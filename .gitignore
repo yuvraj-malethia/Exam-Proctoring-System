@@ -1,0 +1,28 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environment / secrets
+.env
+.env.*
+*.key
+*.pem
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project archives / old versions
+archive/
+
+# Large diagnostic profile logs
+diagnostics/profile_*.jsonl
+
+# Generated session evidence
+evidence/

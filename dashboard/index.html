@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en" data-theme="paper">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Exam Monitor · CPG-127</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <script>
+      // Theme before first paint, so the page never flashes the wrong one.
+      (function () {
+        try {
+          var t = localStorage.getItem("em-theme");
+          if (t === "night" || t === "paper") document.documentElement.dataset.theme = t;
+        } catch (e) {}
+      })();
+    </script>
+    <!-- Typefaces. Offline (an exam hall with no internet) the page falls
+         back to Windows' own Sitka, Segoe UI and Cascadia Mono, chosen to
+         keep the same serif / sans / mono split. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&display=swap" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <!-- ═════════════════════════════════════════════════════════════
+         MASTHEAD — pages follow the phases of an exam (set up, watch,
+         review), so the numbered tabs read left to right like the day.
+         ═════════════════════════════════════════════════════════════ -->
+    <header class="mast">
+      <a class="brand" href="#live" aria-label="Exam Monitor, live view">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <path class="bm-fan" d="M16 16 L7.5 3.5 A15 15 0 0 1 24.5 3.5 Z" />
+          <circle class="bm-ring" cx="16" cy="16" r="14" />
+          <line class="bm-gaze" x1="16" y1="16" x2="21" y2="5.5" />
+          <circle class="bm-head" cx="16" cy="16" r="4.2" />
+        </svg>
+        <span class="brand-words">
+          <span class="brand-name">Exam Monitor</span>
+          <span class="brand-sub">CPG-127</span>
+        </span>
+      </a>
+
+      <nav class="nav" aria-label="Pages">
+        <div class="nav-phases">
+          <a class="nav-item" href="#setup" data-page="setup"><span class="nav-num">1</span>Setup</a>
+          <a class="nav-item" href="#live" data-page="live"><span class="nav-num">2</span>Live<span class="nav-alert" id="nav-alert" hidden></span></a>
+          <a class="nav-item" href="#review" data-page="review"><span class="nav-num">3</span>Review</a>
+        </div>
+        <div class="nav-aux">
+          <a class="nav-item" href="#students" data-page="students">Students</a>
+          <a class="nav-item" href="#calibration" data-page="calibration">Calibration</a>
+          <a class="nav-item" href="#validation" data-page="validation">Validation</a>
+          <a class="nav-item" href="#developer" data-page="developer">Developer</a>
+        </div>
+      </nav>
+
+      <div class="mast-right">
+        <div class="mast-stat mast-clock" title="Time since the session started">
+          <span class="eyebrow">Session</span><span class="num" id="tb-session">00:00</span>
+        </div>
+        <div class="mast-stat" title="Students in view of the camera">
+          <span class="eyebrow">In view</span><span class="num" id="tb-visible">—</span>
+        </div>
+        <div class="mast-stat hide-sm" title="Frames the engine analyses per second">
+          <span class="eyebrow">FPS</span><span class="num" id="tb-fps">—</span>
+        </div>
+        <div id="conn-pill" class="conn" data-state="connecting" role="status" aria-live="polite">
+          <span class="conn-dot" aria-hidden="true"></span><span id="conn-pill-text">Connecting</span>
+        </div>
+        <button type="button" class="icon-btn" id="theme-btn" aria-label="Switch between paper and night theme" title="Theme (T)">
+          <svg class="theme-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" /></svg>
+          <svg class="theme-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></svg>
+        </button>
+        <div class="account">
+          <button type="button" class="account-btn" id="account-btn" aria-haspopup="menu" aria-expanded="false" aria-label="Account menu">
+            <span id="account-initial">·</span>
+          </button>
+          <div class="menu" id="account-menu" role="menu" hidden>
+            <div class="menu-head"><span class="eyebrow" id="account-label">Signed in as</span><b id="account-name">—</b></div>
+            <button type="button" role="menuitem" id="mock-toggle" hidden>Switch to demo data</button>
+            <button type="button" role="menuitem" id="shortcuts-btn">Keyboard shortcuts <kbd>?</kbd></button>
+            <button type="button" role="menuitem" id="signout-btn" class="danger">Sign out</button>
+            <div class="menu-note" id="account-note" hidden></div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- SPECIMEN for demo data, RECORDING for a replayed clip, and a loud
+         warning when live data stops arriving. A recording or demo must
+         never be mistakable for a live exam. -->
+    <div id="banner" class="banner" role="status" aria-live="polite" hidden>
+      <span class="banner-stamp" id="banner-stamp">Specimen</span>
+      <span id="banner-text"></span>
+    </div>
+
+    <main id="main">
+      <!-- ═══════════════════════════════════════════════════════════
+           LIVE — during the exam
+           ═══════════════════════════════════════════════════════════ -->
+      <section class="page" data-page="live" aria-label="Live monitor">
+        <div class="hall">
+          <div>
+            <p class="eyebrow" id="hall-eyebrow">During the exam</p>
+            <h1 class="hall-line" id="hall-line">Waiting for the engine…</h1>
+            <p class="hall-sub" id="hall-sub">The dashboard fills in as soon as the first frame arrives.</p>
+          </div>
+          <div class="tally" id="tally" aria-label="How many students are at each verdict">
+            <div class="tally-cell" data-v="OK"><span class="tally-n">0</span><span class="tally-k">OK</span></div>
+            <div class="tally-cell" data-v="WATCH"><span class="tally-n">0</span><span class="tally-k">WATCH</span></div>
+            <div class="tally-cell" data-v="ALERT"><span class="tally-n">0</span><span class="tally-k">ALERT</span></div>
+            <div class="tally-cell" data-v="FLAG"><span class="tally-n">0</span><span class="tally-k">FLAG</span></div>
+          </div>
+        </div>
+
+        <div class="callouts" id="callouts">
+          <!-- Identity questions the system could not answer on its own.
+               It never decides these silently: when unsure whether a
+               returning face is the same student, it asks the person who
+               actually knows who left the room. -->
+          <section class="callout" id="identity-review-panel" hidden>
+            <span class="callout-mark" aria-hidden="true">?</span>
+            <p class="eyebrow">A question for you</p>
+            <div class="callout-body" id="identity-review-list"></div>
+          </section>
+          <!-- Relationships BETWEEN students (correlation.py). Never an
+               accusation — always shown with its caveat. -->
+          <section class="callout callout-link" id="correlation-panel" hidden>
+            <span class="callout-mark" aria-hidden="true">&harr;</span>
+            <p class="eyebrow">Between students</p>
+            <div class="callout-body" id="correlation-list"></div>
+          </section>
+        </div>
+
+        <div class="seats" id="seats" aria-label="Seat plan"></div>
+        <p class="seats-note">Seats appear left to right as the camera sees them. Select one for the reasons behind its verdict. Keys <kbd>1</kbd>–<kbd>4</kbd> open a seat.</p>
+
+        <div class="stage">
+          <section class="pane" aria-label="Camera">
+            <header class="pane-head">
+              <div><p class="eyebrow">Camera</p><h2 class="pane-title">What the engine sees</h2></div>
+            </header>
+            <div class="camera-well">
+              <img id="video-feed" alt="Live classroom camera, annotated by the engine" />
+              <div class="camera-empty" id="camera-empty" hidden>
+                <span class="serif">No picture</span>
+                <span class="fine" style="color: inherit">The camera feed is paused off this page, or the engine is not sending frames.</span>
+              </div>
+              <div class="camera-tags">
+                <span class="glass-tag" id="camera-tag-status" data-status="off"><span class="dot"></span><span id="camera-status-text">Camera</span></span>
+                <span class="glass-tag"><span id="camera-face-count">0</span>&nbsp;faces</span>
+              </div>
+            </div>
+            <div class="camera-facts">
+              <div><span class="eyebrow">Frames / s</span><span class="num" id="cam-fps">—</span></div>
+              <div><span class="eyebrow">Calibrated</span><span class="num" id="cam-cal">—</span></div>
+              <div><span class="eyebrow">Filtered detections</span><span class="num" id="cam-filtered">—</span></div>
+            </div>
+          </section>
+
+          <!-- 3D exam room. Built entirely by digital_twin.js (the same
+               code builds the Session Replay on the Review page). -->
+          <section class="pane twin" data-twin-root="live" aria-label="3D exam room"></section>
+        </div>
+
+        <div class="lower">
+          <section class="pane" aria-label="Suspicion over time">
+            <header class="pane-head">
+              <div><p class="eyebrow">Last five minutes</p><h2 class="pane-title">Suspicion over time</h2></div>
+            </header>
+            <div class="chart" id="risk-chart-wrap"><svg id="risk-chart" role="img" aria-label="Suspicion score of every student over the last five minutes"></svg></div>
+            <div class="lanes-head"><p class="eyebrow">Looks away · last 60 seconds</p></div>
+            <div class="lanes" id="lanes"></div>
+            <div class="lanes-axis"><span>−60 s</span><span>−45 s</span><span>−30 s</span><span>−15 s</span><span>now</span></div>
+          </section>
+
+          <section class="pane" aria-label="Event log">
+            <header class="pane-head">
+              <div><p class="eyebrow">Log</p><h2 class="pane-title">What happened</h2></div>
+            </header>
+            <div class="seg log-filter" id="log-filter" role="group" aria-label="Show">
+              <button type="button" class="seg-btn is-active" data-log="all">All</button>
+              <button type="button" class="seg-btn" data-log="verdict">Verdicts</button>
+              <button type="button" class="seg-btn" data-log="look">Looks away</button>
+              <button type="button" class="seg-btn" data-log="evidence">Evidence</button>
+              <button type="button" class="seg-btn" data-log="system">System</button>
+            </div>
+            <ol class="log" id="log"></ol>
+          </section>
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════
+           SETUP — before the exam
+           ═══════════════════════════════════════════════════════════ -->
+      <section class="page" data-page="setup" aria-label="Exam setup">
+        <header class="page-head">
+          <p class="eyebrow">Before the exam</p>
+          <h1 class="page-title">Set up the room</h1>
+          <p class="page-lede">Register who is sitting where, tell the system how many people are really in the room, then lock the register. Two minutes here makes every report name people instead of seat numbers.</p>
+        </header>
+
+        <div class="setup-grid">
+          <section class="pane">
+            <header class="pane-head">
+              <div><p class="eyebrow">Register</p><h2 class="pane-title">Students in this exam</h2></div>
+              <span class="register-status" id="roster-panel-status"></span>
+            </header>
+            <p class="notice" id="register-off" hidden>Registration needs the real engine. In demo mode there are no real students to register.</p>
+            <div class="register-table">
+              <div class="register-row is-head">
+                <span class="eyebrow">Seat</span><span class="eyebrow">Name</span><span class="eyebrow roll">Roll no.</span><span></span>
+              </div>
+              <div id="roster-rows"></div>
+            </div>
+            <footer class="register-foot">
+              <button type="button" class="btn btn-stamp" id="roster-lock-btn">Lock register</button>
+              <p class="fine">Locking fixes who is in the room and stops background objects being tracked as students. Press <kbd>Enter</kbd> in a row to save it.</p>
+            </footer>
+          </section>
+
+          <div class="setup-side">
+            <section class="pane">
+              <header class="pane-head"><div><p class="eyebrow">Checklist</p><h2 class="pane-title">Before you start</h2></div></header>
+              <ol class="todo" id="setup-checks"></ol>
+            </section>
+            <section class="pane">
+              <header class="pane-head"><div><p class="eyebrow">Head count</p><h2 class="pane-title">How many students are in the room?</h2></div></header>
+              <div class="headcount-row">
+                <div class="seg" id="roster-btns" role="group" aria-label="Students in the room">
+                  <button type="button" class="seg-btn" data-roster="1">1</button>
+                  <button type="button" class="seg-btn" data-roster="2">2</button>
+                  <button type="button" class="seg-btn" data-roster="3">3</button>
+                  <button type="button" class="seg-btn" data-roster="4">4</button>
+                  <button type="button" class="seg-btn" data-roster="auto">Auto</button>
+                </div>
+              </div>
+              <p class="fine" id="roster-note"></p>
+              <p class="fine" style="margin-top: 10px">Background objects can look like faces for tens of seconds at a time, which no automatic test can tell apart from a student. You know how many people are here; the system then tracks only that many, keeping the nearest faces.</p>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════
+           REVIEW — after the exam
+           ═══════════════════════════════════════════════════════════ -->
+      <section class="page" data-page="review" aria-label="Review">
+        <header class="page-head">
+          <p class="eyebrow">After the exam</p>
+          <h1 class="page-title">Review the session</h1>
+          <p class="page-lede">The written report, a replay of any recorded session, and the snapshots saved when a student reached ALERT or FLAG. Nothing here decides anything: it is the record a person reviews.</p>
+        </header>
+
+        <section class="pane report">
+          <div class="report-doc" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div>
+            <p class="eyebrow">Session report</p>
+            <h2 class="pane-title">A PDF to print, keep and hand over</h2>
+            <p>Findings, named patterns, evidence images and a timeline for every student, written to describe what was observed, never to accuse. One is also written automatically when the exam ends.</p>
+          </div>
+          <div class="report-actions">
+            <button type="button" class="btn btn-primary" id="report-btn">Generate PDF</button>
+            <span class="report-status" id="report-status"></span>
+          </div>
+        </section>
+
+        <!-- Session replay: built by session_replay.js + digital_twin.js. -->
+        <section class="pane twin" data-replay-root aria-label="Session replay"></section>
+
+        <section class="pane" aria-label="Evidence">
+          <header class="pane-head">
+            <div><p class="eyebrow">Evidence</p><h2 class="pane-title">Latest snapshot for each student</h2></div>
+          </header>
+          <div class="exhibits-grid" id="evidence-grid"></div>
+        </section>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════
+           STUDENTS — per-student analysis
+           ═══════════════════════════════════════════════════════════ -->
+      <section class="page" data-page="students" aria-label="Students">
+        <header class="page-head">
+          <p class="eyebrow">Per-student analysis</p>
+          <h1 class="page-title">Students</h1>
+          <p class="page-lede">Everything behind one student's score: the checks behind the verdict, named patterns, how each signal contributes, and their head movement.</p>
+        </header>
+        <div class="tabs" id="student-tabs" role="tablist"></div>
+        <div id="student-detail"></div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════
+           CALIBRATION
+           ═══════════════════════════════════════════════════════════ -->
+      <section class="page" data-page="calibration" aria-label="Calibration">
+        <header class="page-head">
+          <p class="eyebrow">Each student's own straight-ahead</p>
+          <h1 class="page-title">Calibration</h1>
+          <p class="page-lede">In the first seconds at the desk, the system learns how each student naturally sits. Everything afterwards is measured against that, so a student who sits slightly turned is never judged by someone else's posture.</p>
+        </header>
+        <div class="calib-row" id="calib-status-row"></div>
+        <div class="tabs" id="calib-tabs" role="tablist"></div>
+        <div id="calib-detail"></div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════
+           VALIDATION — does it do what it should, on footage of known
+           behaviour? (validation.py, video_batch.py, whatif.py)
+           ═══════════════════════════════════════════════════════════ -->
+      <section class="page" data-page="validation" aria-label="Validation">
+        <header class="page-head">
+          <p class="eyebrow">Does it work?</p>
+          <h1 class="page-title">Validation</h1>
+          <p class="page-lede">Clips recorded to show known behaviour are replayed through the real engine, exactly as a live exam would be, and each result is compared with what the clip was recorded to show. A match means the system behaved as intended on that footage. It is not proof of accuracy in general.</p>
+        </header>
+
+        <section class="pane val-result">
+          <header class="pane-head">
+            <div>
+              <p class="eyebrow" id="val-eyebrow">Latest check</p>
+              <h2 class="val-line" id="val-line">Loading…</h2>
+              <p class="fine" id="val-meta"></p>
+            </div>
+            <div class="val-run">
+              <button type="button" class="btn btn-primary" id="val-run-btn">Run the check</button>
+              <span class="fine" id="val-run-note"></span>
+            </div>
+          </header>
+          <div class="val-progress" id="val-progress" hidden>
+            <div class="progress"><div id="val-progress-bar"></div></div>
+            <span class="fine" id="val-progress-text"></span>
+          </div>
+          <div class="marking" id="val-grid" aria-label="Results against labels"></div>
+          <p class="notice" id="val-stale" hidden></p>
+        </section>
+
+        <section class="pane">
+          <header class="pane-head">
+            <div><p class="eyebrow">Clip by clip</p><h2 class="pane-title">What happened on each clip</h2></div>
+            <div class="verdict-key" aria-hidden="true">
+              <span><i data-v="CALIBRATING"></i>Calibrating</span><span><i data-v="OK"></i>OK</span>
+              <span><i data-v="WATCH"></i>Watch</span><span><i data-v="ALERT"></i>Alert</span><span><i data-v="FLAG"></i>Flag</span>
+            </div>
+          </header>
+          <div class="val-table" id="val-table"></div>
+        </section>
+
+        <div class="grid-2" style="margin-top: 18px">
+          <section class="pane">
+            <header class="pane-head"><div><p class="eyebrow">What if…</p><h2 class="pane-title">Try another setting on the same clips</h2></div></header>
+            <p class="fine" style="margin-bottom: 12px">Re-scores every clip from the numbers saved during the last check, with one setting changed. Takes seconds and never touches a live exam. With a handful of clips from one person it shows the direction of a trade-off, not accuracy, and on its own it is never a reason to change a default.</p>
+            <div class="whatif-form">
+              <label class="whatif-field"><span class="eyebrow">Setting</span><select class="field" id="wf-setting"></select></label>
+              <label class="whatif-field"><span class="eyebrow">Values to try</span><input class="field" id="wf-values" autocomplete="off" /></label>
+              <button type="button" class="btn" id="wf-run">Try it</button>
+            </div>
+            <p class="fine" id="wf-help"></p>
+            <div id="wf-result"></div>
+          </section>
+
+          <section class="pane">
+            <header class="pane-head">
+              <div><p class="eyebrow">Recording</p><h2 class="pane-title">Clips to record</h2></div>
+              <span class="register-status" id="plan-status"></span>
+            </header>
+            <p class="fine" style="margin-bottom: 10px">About two minutes each, in the exam seat, with the webcam the engine uses. Sit normally for the first ten seconds of every clip: that is when the engine learns your normal posture. Run each command from the project folder.</p>
+            <ol class="todo plan" id="val-plan"></ol>
+          </section>
+        </div>
+
+        <section class="pane" style="margin-top: 18px">
+          <header class="pane-head"><div><p class="eyebrow">History</p><h2 class="pane-title">Every check so far</h2></div></header>
+          <div class="grid-2">
+            <div><p class="eyebrow" style="margin-bottom: 8px">Since the previous check</p><ul class="changes" id="val-changes"></ul></div>
+            <div><p class="eyebrow" style="margin-bottom: 8px">All checks</p><div id="val-history"></div></div>
+          </div>
+        </section>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════
+           DEVELOPER
+           ═══════════════════════════════════════════════════════════ -->
+      <section class="page" data-page="developer" aria-label="Developer">
+        <header class="page-head">
+          <p class="eyebrow">Lab notebook</p>
+          <h1 class="page-title">Developer</h1>
+          <p class="page-lede">Every stage of the pipeline for one student, the raw values, and the exact JSON the engine sends.</p>
+        </header>
+        <div class="tabs" id="dev-tabs" role="tablist"></div>
+        <div id="dev-detail"></div>
+      </section>
+    </main>
+
+    <!-- Identity questions also surface here, over the page, because in
+         real testing a panel below the fold was never noticed. Dismissing
+         hides only this; the question stays open on the Live page. -->
+    <div class="id-alert" id="identity-alert" role="alertdialog" aria-labelledby="identity-alert-count" hidden>
+      <div class="id-alert-head">
+        <span class="pulse-dot" aria-hidden="true"></span>
+        <span class="eyebrow" id="identity-alert-count">Identity confirmation needed</span>
+        <button type="button" class="icon-btn" data-identity-alert-dismiss aria-label="Hide this reminder">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+        </button>
+      </div>
+      <div class="id-alert-body" id="identity-alert-body"></div>
+    </div>
+
+    <!-- Seat inspector: the reasons behind one student's verdict. -->
+    <div class="scrim" id="scrim" hidden></div>
+    <aside class="inspector" id="inspector" aria-label="Seat details" hidden></aside>
+
+    <div class="scrim" id="shortcuts-scrim" hidden></div>
+    <div class="modal" id="shortcuts" role="dialog" aria-labelledby="shortcuts-title" hidden>
+      <p class="eyebrow">Keyboard</p>
+      <h2 id="shortcuts-title">Shortcuts</h2>
+      <div class="keys">
+        <span><kbd>1</kbd>–<kbd>4</kbd></span><span>Open that seat (on Live) or its tab</span>
+        <span><kbd>Esc</kbd></span><span>Close the seat panel or this sheet</span>
+        <span><kbd>T</kbd></span><span>Paper / night theme</span>
+        <span><kbd>Space</kbd></span><span>Play or pause a session replay</span>
+        <span><kbd>←</kbd> <kbd>→</kbd></span><span>Step a paused replay</span>
+        <span><kbd>?</kbd></span><span>This sheet</span>
+      </div>
+    </div>
+
+    <script src="dashboard.js"></script>
+    <script src="digital_twin.js"></script>
+    <script src="session_replay.js"></script>
+  </body>
+</html>
