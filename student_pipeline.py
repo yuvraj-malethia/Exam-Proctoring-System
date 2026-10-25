@@ -11,6 +11,7 @@ from calibration import CalibrationEngine
 from kinematics import KinematicAnalyzer
 from temporal import TemporalPatternEngine
 from suspicion import SuspicionFusion
+import eye_gaze
 
 # ═══════════════════════════════════════════════════════════════════
 # STUDENT PIPELINE — Wraps all per-student state in one object
@@ -81,6 +82,35 @@ class StudentPipeline:
         self.pitch_z = 0.0
         self.looking_down = False
 
+        # ── Eye pipeline (parallel to both) ────────────────────────
+        # Where the eyes point inside their sockets, which is a
+        # different thing from where the head points. Same shape as the
+        # pitch pipeline above — own filter, own calibrated baseline,
+        # because every student's eyes rest differently against their
+        # own eye corners. Closes the "still head, moving eyes" gap.
+        self.eye_kalman = KalmanFilter1D(process_noise=0.3, measurement_noise=4.0)
+        self.eye_calib = CalibrationEngine(
+            freeze_after_calibration=Config.CALIBRATION_FREEZE_ENABLED)
+        self.raw_eye = 0.0
+        self.eye = 0.0
+        self.eye_z = 0.0
+        # Vertical eye channel, its own filter and baseline again. It
+        # exists for the one posture neither head signal can see: a level
+        # head with the eyes dropped to something on the desk. Pitch sees
+        # nothing (the head did not move) and the sideways eye channel
+        # sees nothing (the eyes did not go sideways).
+        self.eye_v_kalman = KalmanFilter1D(process_noise=0.3, measurement_noise=4.0)
+        self.eye_v_calib = CalibrationEngine(
+            freeze_after_calibration=Config.CALIBRATION_FREEZE_ENABLED)
+        self.raw_eye_v = 0.0
+        self.eye_v = 0.0
+        self.eye_v_z = 0.0
+        self.eye_openness = 0.0
+        self.eyes_aside = False       # eyes away while the head is not
+        self.eye_direction = None     # "Eyes Left" / "Eyes Right"
+        self.eye_seen = False         # iris landmarks available at all
+        self.room_away = None         # last room-context damping input
+
         # How many distinct people have occupied this slot this session.
         # Starts at 1; incremented by reset() when the seat changes hands.
         self.occupant_serial = 1
@@ -130,6 +160,35 @@ class StudentPipeline:
         self.pitch = 0.0
         self.pitch_z = 0.0
         self.looking_down = False
+
+        # ── Eye pipeline (parallel to both) ────────────────────────
+        # Where the eyes point inside their sockets, which is a
+        # different thing from where the head points. Same shape as the
+        # pitch pipeline above — own filter, own calibrated baseline,
+        # because every student's eyes rest differently against their
+        # own eye corners. Closes the "still head, moving eyes" gap.
+        self.eye_kalman = KalmanFilter1D(process_noise=0.3, measurement_noise=4.0)
+        self.eye_calib = CalibrationEngine(
+            freeze_after_calibration=Config.CALIBRATION_FREEZE_ENABLED)
+        self.raw_eye = 0.0
+        self.eye = 0.0
+        self.eye_z = 0.0
+        # Vertical eye channel, its own filter and baseline again. It
+        # exists for the one posture neither head signal can see: a level
+        # head with the eyes dropped to something on the desk. Pitch sees
+        # nothing (the head did not move) and the sideways eye channel
+        # sees nothing (the eyes did not go sideways).
+        self.eye_v_kalman = KalmanFilter1D(process_noise=0.3, measurement_noise=4.0)
+        self.eye_v_calib = CalibrationEngine(
+            freeze_after_calibration=Config.CALIBRATION_FREEZE_ENABLED)
+        self.raw_eye_v = 0.0
+        self.eye_v = 0.0
+        self.eye_v_z = 0.0
+        self.eye_openness = 0.0
+        self.eyes_aside = False       # eyes away while the head is not
+        self.eye_direction = None     # "Eyes Left" / "Eyes Right"
+        self.eye_seen = False         # iris landmarks available at all
+        self.room_away = None         # last room-context damping input
         self.kinematic = KinematicAnalyzer()
         self.temporal = TemporalPatternEngine()
         self.fusion = SuspicionFusion()
@@ -231,7 +290,8 @@ class StudentPipeline:
 
     def process(
         self, yaw_raw: float, is_profile: bool, face_ar: float, dt: float, t: float,
-        pitch_raw: float = None
+        pitch_raw: float = None, eye_raw: float = None, eye_openness: float = None,
+        eye_down: float = None, room_away: float = None
     ) -> None:
         """
         Run one frame of analysis for this student.
@@ -283,6 +343,52 @@ class StudentPipeline:
                 self.pitch_calib.adapt(self.pitch, abs(self.pitch_z))
         self.looking_down = pitch_down
 
+        # 1c. Eye pipeline — parallel again, and the same shape. Whether
+        # it is allowed to COUNT is decided below, once we know whether
+        # the head is already away: see the comment there.
+        self.eye_seen = eye_raw is not None
+        eye_deviating = False
+        if Config.EYE_TRACKING_ENABLED and eye_raw is not None and not is_profile:
+            self.raw_eye = eye_raw
+            self.eye_openness = eye_openness if eye_openness is not None else 0.0
+            self.eye, _ = self.eye_kalman.update(eye_raw, dt)
+            self.eye_calib.feed(self.eye)
+            h_from_base = v_from_base = 0.0
+            if self.eye_calib.is_calibrated:
+                self.eye_z = self.eye_calib.z_score(self.eye)
+                h_from_base = self.eye - self.eye_calib.baseline
+                # Both bars, for the same reason pitch has both: a
+                # student whose eyes barely move has a tiny std, and a
+                # z-score on its own would flag ordinary reading.
+                eye_deviating = (
+                    abs(self.eye_z) > Config.EYE_K_SIGMA
+                    and abs(h_from_base) > Config.EYE_MIN_OFFSET
+                )
+                self.eye_calib.adapt(self.eye, abs(self.eye_z))
+
+            # Vertical, run the same way and judged on its own floor,
+            # which is smaller: an eye travels less far up and down than
+            # side to side before the lid gets in the way.
+            head_level = not pitch_down and (
+                abs(self.pitch_z) <= Config.PITCH_K_SIGMA
+                if self.pitch_calib.is_calibrated else True)
+            if (Config.EYE_VERTICAL_ENABLED and eye_down is not None
+                    and (head_level or not Config.EYE_REQUIRE_HEAD_LEVEL)):
+                self.raw_eye_v = eye_down
+                self.eye_v, _ = self.eye_v_kalman.update(eye_down, dt)
+                self.eye_v_calib.feed(self.eye_v)
+                if self.eye_v_calib.is_calibrated:
+                    self.eye_v_z = self.eye_v_calib.z_score(self.eye_v)
+                    v_from_base = self.eye_v - self.eye_v_calib.baseline
+                    if (abs(self.eye_v_z) > Config.EYE_K_SIGMA
+                            and abs(v_from_base) > Config.EYE_MIN_OFFSET_V):
+                        eye_deviating = True
+                    self.eye_v_calib.adapt(self.eye_v, abs(self.eye_v_z))
+
+            if eye_deviating:
+                self.eye_direction = eye_gaze.direction_label(
+                    h_from_base, v_from_base if eye_down is not None else None)
+
         # 2. Calibration phase
         self.calib.feed(self.yaw)
 
@@ -301,6 +407,20 @@ class StudentPipeline:
                 away = True
                 direction = "Down"
 
+            # Eyes last, and only while the head is NOT already away.
+            # Two reasons, both deliberate: a turned head is already
+            # covered by yaw above, and a turned head also drags the
+            # iris against the eye corners through plain perspective, so
+            # a reading taken then is contaminated as well as redundant.
+            # What is left is precisely the case the head alone cannot
+            # see — still head, eyes to the side.
+            self.eyes_aside = False
+            if eye_deviating and not (away and Config.EYE_REQUIRE_HEAD_FORWARD):
+                self.eyes_aside = True
+                if not away:
+                    away = True
+                    direction = self.eye_direction or "Eyes"
+
             if away:
                 self.temporal.mark_away(t, direction, abs(self.z))
             else:
@@ -313,7 +433,20 @@ class StudentPipeline:
             _pos_z = abs(self.z)
             if pitch_down:
                 _pos_z = max(_pos_z, abs(self.pitch_z))
+            if self.eyes_aside:
+                _pos_z = max(_pos_z, abs(self.eye_z), abs(self.eye_v_z))
             pos_score = min(_pos_z / (Config.K_SIGMA * 2.5), 1.0)
+            # Room context (room_context.py). A glance the whole room
+            # shares is weaker evidence than the same glance made alone,
+            # so the instantaneous position term is discounted by how
+            # much of the rest of the room was also away. ONLY this term:
+            # the event itself is still recorded and still counts toward
+            # frequency, away-ratio and session memory. room_away is None
+            # whenever the feature is off or there is no room to compare
+            # against, and then nothing changes.
+            self.room_away = room_away
+            if Config.ROOM_CONTEXT_ENABLED and room_away is not None:
+                pos_score *= max(0.0, 1.0 - Config.ROOM_DAMP * room_away)
             vel_score = self.kinematic.velocity_norm
             freq_score = self.temporal.frequency_score(t)
             dur_score = self.temporal.away_ratio(t)

@@ -4,9 +4,9 @@ A computer-vision based exam monitoring system that analyzes student head moveme
 
 The system uses facial landmarks, individual calibration, temporal analysis, multi-signal suspicion scoring, identity tracking, behavioral pattern detection, and cross-student correlation to provide invigilators with real-time information about events that may require attention.
 
-> **Status:** Active Development  
-> **Type:** Capstone Project  
-> **Language:** Python
+> **Status:** Feature-complete capstone, under evaluation  
+> **Type:** Capstone Project (CPG-127)  
+> **Language:** Python 3.11 · JavaScript
 
 ---
 
@@ -85,6 +85,19 @@ The system extracts facial landmarks and estimates head orientation, including:
 - Head orientation
 - Deviation from the student's calibrated baseline
 
+### Eye Tracking
+
+Head pose alone has a well-known blind spot: a student can keep the head still and move only the eyes.
+
+The system measures where each iris sits between that eye's own inner and outer corners, as a percentage of eye width. Because the corners move with the head, this is a genuinely separate signal from head orientation.
+
+- Iris landmarks from MediaPipe Face Mesh (`refine_landmarks=True`)
+- A separate calibrated baseline for the eyes
+- Eye readings are only acted on while the head is in its normal range, which avoids perspective errors from a turned head
+- Unreadable frames (head down, blink, small face) are treated as *no reading*, never as "eyes centred"
+
+On a recorded clip of a student glancing with the eyes only, the head-only pipeline scored 0.5% with zero events; with eye tracking it reached ALERT.
+
 ### Individual Calibration
 
 Different students naturally sit and move differently.
@@ -98,7 +111,7 @@ Calibration tracks:
 - Initial baseline
 - Adaptive deviation threshold
 
-The calibration implementation uses online statistical estimation.
+The calibration implementation uses online statistical estimation (Welford's algorithm). The baseline is learned in the first seconds and then **frozen**, so a student who repeatedly looks away cannot slowly redefine their own "normal".
 
 ### Signal Processing
 
@@ -165,7 +178,17 @@ It looks for temporal relationships such as:
 - Repeated directional relationships
 - Delayed behavioral responses
 
-These correlations are presented as additional signals and do not directly replace individual scoring.
+These correlations are presented as additional signals and do not directly replace individual scoring. Seating order is taken from real face positions, not seat numbers.
+
+### Room Context
+
+When something happens in the room (an announcement, a dropped book), many students look up at once. The system measures, for each student, how much of the *rest* of the room was looking away at the same moment and discounts the position signal accordingly. The event is still recorded; nothing is hidden from the invigilator.
+
+### Students the Camera Cannot See
+
+A seat with no readable face is reported explicitly ("cannot be seen for N seconds") instead of silently scoring as normal. Absence is **not** treated as a suspicion signal, because ordinary writing with the head low can cause it too.
+
+An optional body-pose check distinguishes "head down over the desk" from "the chair is empty", and an optional face-rescue path (YuNet detector + re-running landmarks on the crop) recovers small or partly hidden faces.
 
 ### Identity Tracking
 
@@ -202,7 +225,7 @@ Captured evidence can contain:
 - Timestamp
 - Associated behavioral information
 
-Evidence is generated locally during execution and is **not included in this repository**.
+Evidence is generated locally during execution and is **not included in this repository**. New snapshots also appear live on the dashboard as they are saved.
 
 ### Live Web Dashboard
 
@@ -249,6 +272,19 @@ The project contains tools for replaying recorded clips and experimenting with c
 
 This makes it possible to evaluate how changes to thresholds and other configuration values affect system behavior.
 
+### Evaluation Tools
+
+For rigorous testing, the project includes:
+
+- **Interval annotation** (`annotate_clip.py`): mark exactly when cheating happened in a recording
+- **Event-level scoring** (`evaluation.py`): catches, false alarms per honest hour, and latency, under rules fixed in advance
+- **Baselines and ablations** (`experiment.py`): the full system against a fixed head-angle rule and against itself with each component switched off, plus threshold sweeps
+- **A recording protocol** (`research/PROTOCOL.md`) for a multi-participant study
+
+### Reliability
+
+Errors inside the processing loop are grouped, counted and reported. A run in which a meaningful share of frames failed is clearly marked **DEGRADED** rather than reported as a clean result.
+
 ---
 
 ## Architecture
@@ -262,6 +298,7 @@ The project is divided into multiple focused modules.
 | `module_headpose_multi_web.py` | Main multi-student processing loop |
 | `student_pipeline.py` | Per-student processing pipeline |
 | `head_pose.py` | Head-pose extraction |
+| `eye_gaze.py` | Eye-in-head gaze measurement |
 | `calibration.py` | Individual calibration |
 | `kalman_filter.py` | Signal filtering |
 | `kinematics.py` | Velocity and acceleration analysis |
@@ -287,6 +324,10 @@ The project is divided into multiple focused modules.
 | `behavior_patterns.py` | Higher-level behavior patterns |
 | `correlation.py` | Cross-student behavior correlation |
 | `narrative.py` | Human-readable behavioral information |
+| `room_context.py` | Room-wide context for each student |
+| `presence.py` | "Cannot be seen" tracking |
+| `body_presence.py` | Optional body-pose presence check |
+| `face_rescue.py` | Optional recovery of small/partial faces |
 
 ### Evidence & Session Management
 
@@ -298,7 +339,8 @@ The project is divided into multiple focused modules.
 | `watchdog.py` | Runtime monitoring |
 | `system_monitor.py` | System monitoring |
 | `session_replay.py` | Session replay |
-| `session_report.py` | Session processing/report logic |
+| `session_report.py` | PDF session report |
+| `frame_faults.py` | Error accounting for the processing loop |
 
 ### Video & Validation
 
@@ -309,6 +351,11 @@ The project is divided into multiple focused modules.
 | `record_clip.py` | Video recording |
 | `validation.py` | Validation workflow |
 | `whatif.py` | Configuration experiments |
+| `evaluation.py` | Ground truth and event-level metrics |
+| `experiment.py` | Baselines, ablations and threshold sweeps |
+| `annotate_clip.py` | Interval annotation tool |
+| `make_room_clip.py` | Builds a multi-student demo clip from single recordings |
+| `demo.py` | One-command demo launcher |
 
 ### Dashboard
 
@@ -386,6 +433,8 @@ cd Exam-Proctoring-System
 
 ### 2. Create a virtual environment
 
+Python **3.11** is recommended (MediaPipe 0.10.14 provides wheels for it).
+
 ```bash
 python -m venv venv
 ```
@@ -404,13 +453,22 @@ source venv/bin/activate
 
 ### 3. Install dependencies
 
-Install the required Python packages:
-
 ```bash
-pip install opencv-python mediapipe numpy flask werkzeug reportlab
+pip install -r requirements.txt
 ```
 
-> Dependency versions may need to be adjusted depending on your Python version and operating system.
+The versions in `requirements.txt` are the ones the project was developed and tested with. MediaPipe brings its own OpenCV build (`opencv-contrib-python`), so do not install `opencv-python` separately.
+
+### 4. Model files
+
+`models/` contains two small pretrained models used by optional features:
+
+| File | Used by | Source / licence |
+|---|---|---|
+| `face_detection_yunet_2023mar.onnx` | Face rescue, demo clip builder | OpenCV Zoo (YuNet), MIT |
+| `pose_landmarker_lite.task` | Optional body-presence check | Google MediaPipe, Apache 2.0 |
+
+The main face and iris model ships inside the `mediapipe` package.
 
 ---
 
@@ -425,6 +483,34 @@ python module_headpose_multi_web.py
 ```
 
 The application will attempt to open the default webcam and initialize the multi-student monitoring pipeline.
+
+### Recorded Video
+
+```bash
+python module_headpose_multi_web.py --video path/to/clip.mp4
+```
+
+The same engine runs on the file; the dashboard labels it as **REPLAY**, never as live.
+
+### Demo Launcher
+
+```bash
+python demo.py            # four-student room (built from your own recordings)
+python demo.py eyes       # head still, eyes moving
+python demo.py live       # real webcam
+```
+
+Each demo switches on only the settings it needs, for that run only, and prints every change. Demo clips are built from recordings in `clips/`, which are not included in this repository; record your own with `record_clip.py`.
+
+### Testing and Experiments
+
+```bash
+python record_clip.py NAME --label innocent|suspicious   # record a labelled clip into clips/
+python video_batch.py                                    # replay every clip and compare with its label
+python whatif.py --sweep K_SIGMA=2.0,2.3,2.6             # re-score the last batch under other settings
+python annotate_clip.py clips/NAME.mp4                   # mark when cheating actually happened
+python experiment.py --curve                             # baselines, ablations, trade-off curve
+```
 
 ---
 
@@ -571,6 +657,22 @@ The dashboard exposes the underlying signals, score, events, evidence, identity 
 
 ---
 
+## Results So Far
+
+On nine labelled clips recorded by one person with one webcam (four of normal exam behaviour, five of staged cheating):
+
+| | Cheating clips flagged | Normal clips wrongly flagged |
+|---|---|---|
+| Full system | **3 of 5** | **0 of 4** |
+| Without eye tracking | 2 of 5 | 0 of 4 |
+| Fixed 15° head-angle rule (baseline) | 3 of 5 | 1 of 4 — flags ordinary head-down writing |
+
+Two misses are reported openly: a phone held in the lap is physically unmeasurable from a front camera (the face is not visible, and the system reports the student as *cannot be seen*), and a single long look stays just below the flag threshold.
+
+These are staged clips of one person. They show the approach works in the intended direction; they are **not** a general accuracy figure. Cross-student correlation has been tested on simulated data, not yet with real groups.
+
+---
+
 ## Design Principles
 
 ### Individual Baselines
@@ -593,7 +695,15 @@ The system exposes the underlying behavioral signals and detected patterns inste
 
 Computer vision cannot reliably determine the meaning of every student movement.
 
-The system therefore provides information and evidence for an invigilator to review.
+The system therefore provides information and evidence for an invigilator to review. Its strongest possible recommendation is "refer for review"; reports describe what was observed and never assert that cheating occurred.
+
+### Fairness
+
+Innocent behaviour is tested as carefully as cheating. Two early design flaws were found exactly this way: session memory that never decayed, and restless fidgeting being mislabelled as answer-checking. Both were fixed.
+
+### Nothing Is Silently Deleted
+
+When a seat changes hands, the previous occupant's record is archived, never discarded, so leaving the room cannot erase a record.
 
 ### Separation of Processing and UI
 
@@ -619,6 +729,9 @@ Important limitations include:
 - Cross-student correlations are signals for review, not proof of collaboration.
 - Behavioral thresholds require validation on representative examination footage.
 - The system is dependent on the camera's field of view.
+- Camera placement matters: a camera above the face loses the face whenever a student writes with the head down. A camera at or slightly below face height works best.
+- Eye tracking needs a readable iris, so it says little about a student bent over the page.
+- Results so far come from staged recordings of one person.
 
 The system is designed as an **assistive monitoring tool with human oversight**.
 
@@ -633,6 +746,7 @@ Exam-Proctoring-System/
 │
 ├── config.py
 ├── head_pose.py
+├── eye_gaze.py
 ├── calibration.py
 ├── kalman_filter.py
 ├── kinematics.py
@@ -650,12 +764,17 @@ Exam-Proctoring-System/
 ├── behavior_patterns.py
 ├── correlation.py
 ├── narrative.py
+├── room_context.py
+├── presence.py
+├── body_presence.py
+├── face_rescue.py
 │
 ├── evidence_capture.py
 ├── event_logger.py
 ├── frame_profiler.py
 ├── watchdog.py
 ├── system_monitor.py
+├── frame_faults.py
 │
 ├── video_run.py
 ├── video_batch.py
@@ -664,6 +783,11 @@ Exam-Proctoring-System/
 ├── session_report.py
 ├── validation.py
 ├── whatif.py
+├── evaluation.py
+├── experiment.py
+├── annotate_clip.py
+├── make_room_clip.py
+├── demo.py
 │
 ├── dashboard_auth.py
 ├── dashboard_server.py
@@ -675,6 +799,11 @@ Exam-Proctoring-System/
 ├── developer_ui_state.py
 ├── mock_engine.py
 ├── clock.py
+│
+├── requirements.txt
+├── models/
+├── research/
+│   └── PROTOCOL.md
 │
 └── dashboard/
     ├── index.html
@@ -688,15 +817,13 @@ Exam-Proctoring-System/
         └── three.min.js
 ```
 
-Runtime-generated directories such as `evidence/` are intentionally not included in the repository.
+Runtime-generated directories (`evidence/`, `diagnostics/`, `reports/`, `video_results/`) and recordings (`clips/`, `demo/`) are intentionally not included in the repository.
 
 ---
 
 ## Project Status
 
-This project is currently under active development as a capstone project.
-
-The architecture and detection pipeline are still being refined and evaluated.
+The system is feature-complete for its capstone evaluation. The next step is evaluation with more participants and real group sessions.
 
 ---
 

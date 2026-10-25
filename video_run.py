@@ -115,6 +115,8 @@ class VideoRunStats:
         self.source = source
         self.frames = 0
         self.frames_with_face = 0
+        self.presence = {}        # slot -> visibility summary (presence.py)
+        self._last_t = None       # engine time of the frame being recorded
         self.per_slot = {}        # slot -> visible time, verdict time, looking-down frames
         self.pattern_best = {}    # slot -> {pattern label: best confidence}
         self.cross_best = {}      # "label (A & B)" -> best confidence
@@ -133,6 +135,7 @@ class VideoRunStats:
         if self.session_starts is None:
             self.session_starts = {str(sid): st.temporal._session_start
                                    for sid, st in students.items()}
+        self._last_t = t
         self._frame = [t, dt, []]
 
     def _op(self, op):
@@ -145,8 +148,13 @@ class VideoRunStats:
     def note_reset(self, sid, record_id):
         self._op(["r", sid, record_id])
 
-    def note_input(self, sid, yaw_raw, is_profile, face_ar, pitch_raw):
-        self._op(["p", sid, yaw_raw, bool(is_profile), face_ar, pitch_raw])
+    def note_input(self, sid, yaw_raw, is_profile, face_ar, pitch_raw,
+                   eye_raw=None, eye_openness=None, eye_down=None):
+        # Eye values are appended, never inserted: an inputs file written
+        # before eye tracking existed still unpacks correctly, and
+        # whatif.py reads them positionally with a length check.
+        self._op(["p", sid, yaw_raw, bool(is_profile), face_ar, pitch_raw,
+                  eye_raw, eye_openness, eye_down])
 
     def note_merge(self, sid, record_id):
         self._op(["m", sid, record_id])
@@ -173,7 +181,8 @@ class VideoRunStats:
             json.dump(data, f, separators=(",", ":"))
         return path
 
-    def observe(self, dt, active_ids, students, verdicts, patterns, correlations):
+    def observe(self, dt, active_ids, students, verdicts, patterns, correlations,
+                presence=None):
         self.frames += 1
         if active_ids:
             self.frames_with_face += 1
@@ -192,11 +201,16 @@ class VideoRunStats:
             for p in found or []:
                 label = p.get("label") or p.get("key")
                 best[label] = max(best.get(label, 0.0), float(p.get("confidence") or 0.0))
+        # Visibility, kept per clip so a replay can report the thing
+        # that used to be silent: how long this seat could not be read
+        # at all (see presence.py).
+        if presence is not None:
+            self.presence = presence.summary(self._last_t if self._last_t is not None else 0.0)
         for c in correlations or []:
             key = f"{c.get('label')} ({' & '.join(str(x) for x in c.get('pair', []))})"
             self.cross_best[key] = max(self.cross_best.get(key, 0.0), float(c.get("confidence") or 0.0))
 
-    def results(self, students, session_id, report=None) -> dict:
+    def results(self, students, session_id, report=None, faults=None) -> dict:
         src = self.source
         processing = time.perf_counter() - self._perf_start
         flagged_verdicts = tuple(Config.EVIDENCE_CAPTURE_VERDICTS)
@@ -222,6 +236,7 @@ class VideoRunStats:
                 "longest_event_sec": round(max((e.duration for e in events), default=0.0), 1),
                 "total_away_sec": round(st.temporal.total_away_s, 1),
                 "looking_down_frames": seen["looking_down_frames"],
+                "presence": self.presence.get(sid),
                 "patterns": [{"label": k, "best_confidence": round(v, 3)}
                              for k, v in sorted(self.pattern_best.get(sid, {}).items(),
                                                 key=lambda kv: -kv[1])],
@@ -242,6 +257,10 @@ class VideoRunStats:
                 "frames_analysed": self.frames,
                 "footage_sec": round(src.video_sec, 1),
                 "face_seen_pct": round(100.0 * self.frames_with_face / max(self.frames, 1), 1),
+                # Frames the engine swallowed an error on. A replay that
+                # failed must never read as a replay that saw an empty
+                # room — see frame_faults.py.
+                "faults": (faults.payload() if faults is not None else None),
                 "processing_sec": round(processing, 1),
                 "speed_vs_realtime": round(src.video_sec / processing, 2) if processing > 0 else None,
             },
@@ -269,12 +288,12 @@ class VideoRunStats:
             },
         }
 
-    def write(self, path, students, session_id, report=None) -> str:
+    def write(self, path, students, session_id, report=None, faults=None) -> str:
         path = path or os.path.join("video_results", f"{session_id}.json")
         folder = os.path.dirname(path)
         if folder:
             os.makedirs(folder, exist_ok=True)
-        results = self.results(students, session_id, report)
+        results = self.results(students, session_id, report, faults=faults)
         inputs_path = os.path.splitext(path)[0] + ".inputs.json.gz"
         try:
             self.write_inputs(inputs_path, results)

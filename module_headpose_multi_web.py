@@ -95,6 +95,7 @@ from verdict import compute_verdict
 from event_logger import EventLogger
 from evidence_capture import EvidenceCapture
 from frame_profiler import FrameProfiler
+from frame_faults import FrameFaults
 from identity_tracker import IdentityTracker
 from occupant_archive import OccupantArchive
 from face_signature import SignatureGallery
@@ -103,6 +104,11 @@ from behavior_patterns import BehaviorPatternEngine
 from correlation import CrossStudentCorrelator
 from session_report import SessionReportBuilder
 from roster import StudentRoster
+from room_context import RoomContext
+from presence import PresenceTracker
+from body_presence import BodyPresence
+from face_rescue import FaceRescue
+from eye_gaze import extract_eye_gaze
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -133,7 +139,11 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
     mp_face = mp.solutions.face_mesh
     face_mesh = mp_face.FaceMesh(
         max_num_faces=MAX_STUDENTS,
-        refine_landmarks=False,
+        # refine_landmarks adds the iris points eye tracking needs.
+        # On this project's own test footage it also finds the face far
+        # more often (70% -> 98% on one clip), which is a second benefit
+        # the flag was never switched on long enough to notice.
+        refine_landmarks=Config.EYE_TRACKING_ENABLED,
         min_detection_confidence=0.55,
         min_tracking_confidence=0.55,
     )
@@ -196,6 +206,22 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
     # Keeps each student bound to their own slot across frames instead
     # of re-deriving identity from left-to-right order every frame.
     identity = IdentityTracker(MAX_STUDENTS)
+    # presence: says out loud when a seat cannot be measured, instead of
+    # the old silence. Reads identity's slots, feeds no score.
+    presence = PresenceTracker(MAX_STUDENTS)
+    body_presence = BodyPresence(MAX_STUDENTS)
+    body_presence.start()  # no-op and self-explaining when switched off
+    # face rescue: a cheap detector points at the face FaceMesh gave up
+    # on, and the landmark model is run again on that crop. Off by
+    # default — it changes scores. See face_rescue.py.
+    face_rescue = FaceRescue(MAX_STUDENTS)
+    face_rescue.start()
+    # Judges a glance against what the rest of the room is doing at the
+    # same moment. Off unless Config.ROOM_CONTEXT_ENABLED.
+    room = RoomContext(MAX_STUDENTS)
+    # Remembers anything the per-frame except below swallows, so a run
+    # that failed can never again be reported as a clean empty one.
+    faults = FrameFaults()
 
     # Session timestamp — shared by the evidence folder, the occupancy
     # archive, the profiler log and the watchdog log, so every
@@ -429,6 +455,7 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
                 session_id=session_id,
                 session_start=session_start,
                 roster=roster,
+                presence=presence,
             ).build(path, t=clock.now())
             msg = f"Interim session report generated: {path}"
             print(f"[REPORT] {msg}")
@@ -520,6 +547,7 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
 
     while True:
         frame_no += 1
+        faults.saw_frame()
 
         _t_capture0 = time.perf_counter()
         ret, frame = cap.read()
@@ -584,6 +612,27 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
             # genuinely handed to a new person is reset and logged
             # instead of quietly inheriting a record.
             detected_faces = list(results.multi_face_landmarks or [])
+            # Second chance for the faces FaceMesh dropped. Returns
+            # landmarks already remapped into full-frame coordinates, so
+            # everything below this line is unchanged. Does nothing at
+            # all unless Config.FACE_RESCUE_ENABLED.
+            if face_rescue.available:
+                # How many faces might there be? NOT "how many are
+                # already seated" — that was the first version and it
+                # could never bootstrap: with nobody seated yet the
+                # answer was 1, so rescue recovered one student, and the
+                # next frame it was still 1. A hall where everyone is
+                # already sitting when the engine starts, in light poor
+                # enough to need rescue at all, would never get past the
+                # first student. Found on the four-student demo clip,
+                # where FaceMesh finds nothing and YuNet finds all four.
+                # The roster cap is the invigilator's own statement of
+                # how many people are in the room, so it wins when set.
+                _expected = MAX_STUDENTS
+                if roster is not None and roster.is_locked:  # property, not a method
+                    _expected = max(1, roster.registered_count())
+                detected_faces.extend(
+                    face_rescue.rescue(rgb, frame, w, h, detected_faces, _expected))
             # Yaw/profile for each detected face, computed once here so
             # face re-identification can refuse to act on a turned head.
             # extract_yaw() is called again per-student below on the
@@ -734,6 +783,37 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
 
             active_ids = sorted(assignment.keys())  # slots with a face this frame
 
+            # ── Presence: seats the engine cannot measure ──────────────
+            # A seat whose face cannot be read used to produce nothing
+            # at all — no score, no event, no word to anyone. Now the
+            # spell is timed and announced. Nothing here feeds a score:
+            # an innocent student bent low over the page loses their
+            # face too. See presence.py.
+            _body = body_presence.maybe_check(
+                rgb, t, identity, presence.unmeasured_ids(), w)
+            for _tr in presence.update(t, active_ids, identity, _body,
+                                       hands=body_presence.hands):
+                _sid = _tr["slot"]
+                _label = students[_sid].label
+                if _tr["kind"] == "lost":
+                    _body_note = ""
+                    if _tr["body_seen"] is True:
+                        _body_note = " — someone is still sitting there"
+                    elif _tr["body_seen"] is False:
+                        _body_note = " — no body seen in that seat either"
+                    _pmsg = (
+                        f"{_label}: face not measurable for "
+                        f"{_tr['seconds']:.0f}s{_body_note}"
+                    )
+                else:
+                    _pmsg = (
+                        f"{_label}: face visible again after "
+                        f"{_tr['seconds']:.0f}s"
+                    )
+                print(f"[PRESENCE] {_pmsg}")
+                event_logger.add_event(_label, _pmsg)
+                profiler.log_event(t, frame_no, _label, _pmsg)
+
             # ── Process each detected face through its pipeline ────────
             student_processing_ms = 0.0
             drawing_ms = 0.0
@@ -757,11 +837,20 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
                 if yaw_raw is None:
                     yaw_raw = 0.0
 
+                # Where the EYES point, which is not the same question as
+                # where the head points. Returns (None, None) unless the
+                # mesh was built with iris landmarks — see eye_gaze.py.
+                eye_raw, eye_down, eye_open = extract_eye_gaze(lm, w, h)
+
                 # Run the full pipeline for this student
                 student.process(yaw_raw, is_profile, face_ar, dt, t,
-                                 pitch_raw=pitch_raw)
+                                 pitch_raw=pitch_raw,
+                                 eye_raw=eye_raw, eye_openness=eye_open,
+                                 eye_down=eye_down,
+                                 room_away=room.away_fraction(i))
                 if run_stats is not None:
-                    run_stats.note_input(i, yaw_raw, is_profile, face_ar, pitch_raw)
+                    run_stats.note_input(i, yaw_raw, is_profile, face_ar, pitch_raw,
+                                         eye_raw, eye_open, eye_down)
 
                 # WEB DASHBOARD INTEGRATION (new): log yaw for the browser's
                 # live graph. Read-only — appends student.yaw, changes nothing.
@@ -872,6 +961,12 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
                     draw_selected_highlight(frame, student, bbox, t)
                 drawing_ms += (time.perf_counter() - _t_dr0) * 1000.0
 
+            # The per-student loop has finished, so every student's away
+            # state for THIS frame now exists. Record it for the NEXT
+            # frame to read — one frame of lag, by design, rather than
+            # restructuring the loop into two passes. See room_context.py.
+            room.observe(students, active_ids)
+
             # ── WEB DASHBOARD INTEGRATION (new, read-only) ─────────────
             # Serializes existing pipeline state only — see serialize_full_state()
             # above. Wrapped in try/except so a dashboard bug can NEVER crash
@@ -885,7 +980,8 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
                     identity=identity, archive=archive, gallery=gallery,
                     reviews=reviews,
                     patterns=student_patterns, correlations=correlations,
-                    roster=roster, score_logs=score_logs,
+                    roster=roster, score_logs=score_logs, presence=presence,
+                    faults=faults, room=room,
                     replay=({"clip": os.path.basename(video.path),
                              "footage_sec": round(video.video_sec, 1),
                              "footage_total_sec": round(video.frame_count / video.fps, 1)}
@@ -893,7 +989,9 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
                 )
                 SNAPSHOT.update(web_state, None)
             except Exception as e:
-                print(f"[WARN] Dashboard state serialization skipped: {e}")
+                if faults.note(frame_no, e, "dashboard"):
+                    print(f"[ERROR] Dashboard state serialization skipped (first time): {e}")
+                    import traceback as _tbm; print(_tbm.format_exc())
             finally:
                 serialization_ms = (time.perf_counter() - _t_ser0) * 1000.0
 
@@ -993,7 +1091,9 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
                         event_logger.add_event(student.label, _smsg)
                         profiler.log_event(t, frame_no, student.label, _smsg)
             except Exception as e:
-                print(f"[WARN] Analytics logging skipped: {e}")
+                if faults.note(frame_no, e, "analytics"):
+                    print(f"[ERROR] Analytics logging skipped (first time): {e}")
+                    import traceback as _tbm; print(_tbm.format_exc())
             analytics_ms = (time.perf_counter() - _t_an0) * 1000.0
 
             # ── BEHAVIOURAL INTELLIGENCE PASS (new, read-only) ─────
@@ -1018,7 +1118,9 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
                             students, active_ids, t,
                             seat_x={_sid: identity.slots[_sid].cx for _sid in active_ids})
                 except Exception as e:
-                    print(f"[WARN] Behavioural intelligence pass skipped: {e}")
+                    if faults.note(frame_no, e, "behaviour"):
+                        print(f"[ERROR] Behavioural intelligence pass skipped (first time): {e}")
+                        import traceback as _tbm; print(_tbm.format_exc())
             intelligence_ms = (time.perf_counter() - _t_intel0) * 1000.0
 
             # Sample the suspicion score for the report's history graph.
@@ -1035,7 +1137,8 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
             # Video replay summary (see video_run.py). Read-only.
             if run_stats is not None:
                 run_stats.observe(dt, active_ids, students, current_verdict,
-                                  student_patterns, correlations)
+                                  student_patterns, correlations,
+                                  presence=presence)
 
             # ── Header bar ────────────────────────────────────────────
             _t_hdr0 = time.perf_counter()
@@ -1158,6 +1261,20 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
                         "pitch_baseline": round(s.pitch_calib.baseline, 3),
                         "pitch_calibrated": s.pitch_calib.is_calibrated,
                         "looking_down": s.looking_down,
+                        # Added Oct 2026. Eye tracking changed what the
+                        # score is made of, but the log kept recording
+                        # only the head, so a replay of a session could
+                        # not show the eyes at all. `eye` is None when
+                        # the iris could not be read this frame (head
+                        # down, blink, face too small), which is NOT the
+                        # same as "eyes centred" and is kept distinct.
+                        # Logging only; read by nothing in the engine.
+                        "eye": (round(s.eye, 2)
+                                if (Config.EYE_TRACKING_ENABLED
+                                    and i in active_ids and s.eye_seen) else None),
+                        "eye_baseline": round(s.eye_calib.baseline, 2),
+                        "eye_calibrated": s.eye_calib.is_calibrated,
+                        "eyes_aside": bool(s.eyes_aside),
                     }
                 profiler.log_frame(
                     frame_no=frame_no,
@@ -1200,13 +1317,26 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
                     },
                 )
             except Exception as e:
-                print(f"[WARN] Profiler logging skipped: {e}")
+                if faults.note(frame_no, e, "profiler"):
+                    print(f"[ERROR] Profiler logging skipped (first time): {e}")
+                    import traceback as _tbm; print(_tbm.format_exc())
 
         except Exception as e:
             import traceback
             _tb = traceback.format_exc(limit=6)
-            print(f"[WARN] Unhandled error in frame {frame_no}, skipping "
-                  f"this frame (session keeps running): {e}")
+            # Print the FULL traceback the first time each distinct fault
+            # appears, and only then. The old code printed one line per
+            # frame, which on a fault that fires every frame buries the
+            # session in identical warnings while telling you almost
+            # nothing about the cause.
+            if faults.note(frame_no, e):
+                print(f"[ERROR] frame {frame_no}: {type(e).__name__}: {e}")
+                print(traceback.format_exc())
+                print("[ERROR] the session continues; this fault is counted "
+                      "and reported again in the summary.")
+            elif faults.failed % 500 == 0:
+                print(f"[WARN] {faults.failed} frames have now failed "
+                      f"({100.0 * faults.fraction:.0f}%)")
             profiler.log_event(
                 clock.now(), frame_no, "SYSTEM",
                 f"ERROR frame {frame_no}: {type(e).__name__}: {e} | {_tb}",
@@ -1271,6 +1401,7 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
                 session_id=session_id,
                 session_start=session_start,
                 roster=roster,
+                presence=presence,
             ).build(_report_path, t=_t_end)
             report_written = _report_path
             print(f"[REPORT] Session report written to: {_report_path}")
@@ -1289,6 +1420,11 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
             pass
 
     # ── Session summary ───────────────────────────────────────────
+    # Loud, and BEFORE the per-student lines: a reader who skims must
+    # never take an empty summary for a clean one. See frame_faults.py.
+    for _line in faults.report_lines():
+        print(_line)
+
     print("\n[INFO] Session ended. Summary:")
     print("-" * 52)
     for sid, student in students.items():
@@ -1305,7 +1441,7 @@ def main(video_path=None, show_window=True, dashboard=True, paced=None,
     if run_stats is not None:
         try:
             _results = run_stats.write(results_path, students=students,
-                                       session_id=session_id, report=report_written)
+                                       session_id=session_id, report=report_written, faults=faults)
             print(f"[VIDEO] Results written to: {_results}")
         except Exception as e:
             print(f"[WARN] Video results could not be written: {e}")

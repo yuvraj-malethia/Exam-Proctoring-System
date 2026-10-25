@@ -126,6 +126,25 @@
             <p class="eyebrow">A question for you</p>
             <div class="callout-body" id="identity-review-list"></div>
           </section>
+          <!-- The snapshots the engine saved when it flagged someone.
+               Shown here, as it happens, because a flag a person can
+               SEE the moment for is worth more than a number they have
+               to go looking for in Review. -->
+          <section class="callout callout-shot" id="evidence-panel" hidden>
+            <span class="callout-mark" aria-hidden="true">&#9635;</span>
+            <p class="eyebrow">Saved just now</p>
+            <div class="callout-body" id="evidence-list"></div>
+          </section>
+          <!-- Seats the engine cannot read right now (presence.py).
+               A statement of fact, never a suspicion: a student bent
+               low over their page loses their face too. It is here
+               because the alternative — saying nothing at all — is how
+               a seat could go 29 seconds unseen in silence. -->
+          <section class="callout callout-blind" id="blind-panel" hidden>
+            <span class="callout-mark" aria-hidden="true">&#9671;</span>
+            <p class="eyebrow">Cannot be seen</p>
+            <div class="callout-body" id="blind-list"></div>
+          </section>
           <!-- Relationships BETWEEN students (correlation.py). Never an
                accusation — always shown with its caveat. -->
           <section class="callout callout-link" id="correlation-panel" hidden>

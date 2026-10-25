@@ -170,7 +170,12 @@ def rescore(inputs, overrides=None):
                         slot=sid, label=st.label, summary=summary, events=outgoing,
                         started_at=t, ended_at=t, reason="whatif replay")
                 elif kind == "p":
-                    st.process(op[2], op[3], op[4], dt, t, pitch_raw=op[5])
+                    # Inputs recorded before eye tracking existed have
+                    # six fields, not eight. Read what is there.
+                    st.process(op[2], op[3], op[4], dt, t, pitch_raw=op[5],
+                               eye_raw=(op[6] if len(op) > 6 else None),
+                               eye_openness=(op[7] if len(op) > 7 else None),
+                               eye_down=(op[8] if len(op) > 8 else None))
                     active.append(sid)
                 elif kind == "m":
                     prior = records.get(op[2])

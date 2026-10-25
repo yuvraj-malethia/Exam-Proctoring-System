@@ -54,6 +54,7 @@ MOCK_CONFIG = {
     # fell back to a hardcoded default, which is exactly the kind of
     # quiet drift between demo and live that makes a demo misleading.
     "risk_timeline": {"window_sec": 300.0, "points": 90},
+    "eye": {"enabled": True, "k_sigma": 2.6, "min_offset": 12.0},
 }
 
 _LEVEL_BY_SCORE = [
@@ -86,6 +87,10 @@ _DEMO_CX = [110.0, 280.0, 450.0, 620.0]
 # Literal copies of verdict.py's four checks and Config values, NOT
 # imports (see MOCK_CONFIG for why this file never imports the engine).
 _VERDICT_LABELS = ["OK", "WATCH", "ALERT", "FLAG", "FLAG"]
+# Demo clock origin, so the scripted visibility cycle in
+# _MockStudent._presence() is reproducible from process start.
+_START = time.time()
+
 _DEMO_PATTERNS = [
     ("restless", "Restless but undirected", "exonerating",
      "{n} short looks spread across different directions — consistent with "
@@ -173,6 +178,93 @@ class _MockStudent:
             "std": std,
             "down_sign": down_sign,
             "down_threshold_deg": down_threshold,
+        }
+
+    def _event_sources(self):
+        """Demo split of away events by what raised them."""
+        n = len(self.events)
+        if self.sid == 1:
+            eyes = min(4, n)
+        elif self.sid == 3:
+            eyes = min(1, n)
+        else:
+            eyes = 0
+        down = min(max(n - eyes, 0) // 4, 3)
+        head = max(n - eyes - down, 0)
+        return {"head": head, "down": down, "eyes": eyes,
+                "total": head + down + eyes}
+
+    def _room_for(self, t):
+        """Demo room context for one student. Every 55 seconds the whole
+        room looks up together for about 8 seconds, so the chart's room
+        line visibly rises and the seat drawer can say the moment was
+        shared — the one thing a per-student score cannot show."""
+        import math as _m
+        phase = (t - _START) % 55.0
+        shared = phase < 8.0
+        frac = 0.75 if shared else (0.0 if self.sid != 3 else 0.33)
+        return {
+            "away_fraction": round(frac, 3),
+            "others": 3,
+            "shared": bool(frac >= 0.6),
+            "damping": round(0.8 * frac, 3),
+        }
+
+    def _eye(self, t):
+        """Demo eye direction. Mirrors the real payload field for field."""
+        import math as _m
+        wobble = _m.sin((t - _START) * 0.9 + self.sid) * 2.0
+        base = 0.0
+        voff = 0.0
+        if self.sid == 1:
+            # A glance to one side, held ~3s, every 25s, head unmoved.
+            phase = (t - _START) % 25.0
+            aside = phase < 3.0
+            off = -22.0 if aside else 0.0
+        elif self.sid == 3:
+            # Eyes dropping to the desk with a level head, every 40s.
+            # The posture neither head signal can see, so the demo can
+            # show it without a camera.
+            phase = (t - _START) % 40.0
+            aside = 18.0 < phase < 22.0
+            off, voff = 0.0, (11.0 if aside else 0.0)
+        else:
+            aside, off = False, 0.0
+        val = base + off + wobble
+        return {
+            "offset": round(val, 4), "raw": round(val, 4),
+            "z": round(off / 5.0, 2) if off else round(wobble / 5.0, 2),
+            "baseline": base, "calibrated": True,
+            "down_offset": round(voff + wobble * 0.3, 4),
+            "down_z": round(voff / 3.0, 2),
+            "down_baseline": 0.0, "down_calibrated": True,
+            "openness": 0.28, "aside": aside,
+            "direction": (("Eyes Down" if voff else ("Eyes Left" if val < 0 else "Eyes Right"))
+                          if aside else None),
+        }
+
+    def _presence(self, t):
+        """Demo visibility. Seat S3 drops out of measurable view for 35
+        seconds in every 150, so the "cannot be seen" callout and the
+        greyed seat card can be seen working without a camera — and so a
+        demo in front of a panel reaches it inside the first couple of
+        minutes rather than after four. Shape matches
+        presence.PresenceTracker.payload() exactly."""
+        if self.sid != 2:
+            return {"state": "seen", "current_sec": 0.0, "total_unmeasured_sec": 0.0,
+                    "longest_unmeasured_sec": 0.0, "spells": 0, "body_seen": None,
+                    "reportable": False}
+        cycle = (t - _START) % 150.0
+        blind = max(0.0, min(cycle, 105.0) - 70.0)
+        done = int((t - _START) // 150.0)
+        return {
+            "state": "gone" if blind > 30 else ("unmeasured" if blind > 0 else "seen"),
+            "current_sec": round(blind, 1),
+            "total_unmeasured_sec": round(done * 35.0 + blind, 1),
+            "longest_unmeasured_sec": round(max(35.0 if done else 0.0, blind), 1),
+            "spells": done + (1 if blind else 0),
+            "body_seen": True if blind else None,
+            "reportable": blind > 0,
         }
 
     def tick(self, t):
@@ -309,6 +401,22 @@ class _MockStudent:
             "color": self.color,
             "visible": True,
             "verdict": verdict,
+            # Visibility (presence.py). The demo puts one student out of
+            # measurable view on a slow cycle so the "cannot be seen"
+            # callout and the greyed seat card can actually be looked at
+            # without a camera. Kept field-for-field with the real
+            # payload — mock_engine drifting from it has broken the
+            # dashboard before.
+            "presence": self._presence(t),
+            # Eye direction (eye_gaze.py). Seat S2 is scripted to glance
+            # sideways with a still head every so often, which is the one
+            # behaviour head tracking alone cannot show — so the demo can
+            # actually exhibit it without a camera. Shape matches
+            # web_state.serialize_student() exactly.
+            "eye": self._eye(t),
+            # What the rest of the room was doing at the same moment
+            # (room_context.py). Shape-matched to the real payload.
+            "room": self._room_for(t),
             "patterns": patterns,
             "headline_pattern": patterns[0] if patterns else None,
             "latest_evidence": None,
@@ -352,6 +460,11 @@ class _MockStudent:
                 "events_window": recent_n,
                 "window_sec": MOCK_CONFIG["temporal_window_sec"],
                 "total_events": len(self.events),
+                # Where the away events came from, same shape as the
+                # real payload (web_state._event_sources). Seat S2 is
+                # the one scripted to glance with its eyes, so it is the
+                # only one that shows an eye count.
+                "event_sources": self._event_sources(),
                 "total_away_time": round(self.total_away, 1),
                 "away_ratio_raw": round(away_ratio_raw, 3),
                 "away_ratio_score": round(dur_pct / 100.0, 3),
@@ -493,6 +606,22 @@ class MockEngine:
                 "engine_connected": False,
                 "fps": 30.0,
                 "visible_students": 4,
+                # The room as a whole, for the chart's second line.
+                "room": {"students": 4,
+                         "away": (3 if ((time.time() - _START) % 55.0) < 8.0 else 0),
+                         "away_fraction": (0.75 if ((time.time() - _START) % 55.0) < 8.0 else 0.0),
+                         "shared": ((time.time() - _START) % 55.0) < 8.0},
+                # Shape-matched to the real payload (frame_faults.py).
+                # The demo is a healthy run: nothing swallowed.
+                "faults": {"frames": 9000, "failed": 0, "subsystem": 0,
+                           "fraction": 0.0, "degraded": False, "distinct": 0,
+                           "worst": None, "faults": []},
+                "unmeasured": [
+                    {"label": st.label, "sid": st.sid,
+                     "sec": st._presence(t)["current_sec"],
+                     "body_seen": st._presence(t)["body_seen"]}
+                    for st in self.students if st._presence(t)["reportable"]
+                ],
                 "calibrated_students": calibrated,
                 "attention_students": attention,
                 "highest_risk": (

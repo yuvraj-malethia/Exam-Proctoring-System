@@ -41,7 +41,7 @@
     subtitle: "Played back from the session's log, with no video stored: every student's head as it was measured at the time. Jump to any marked moment on the timeline.",
     emptyMessage: "Nobody was in view at this point of the session.",
   });
-  twin.refs.message.textContent = "Choose a recorded session below.";
+  twin.refs.message.textContent = "Pick a session in the box below this panel, then press Open.";
 
   const PLAY_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>';
   const PAUSE_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 2.5h3v11h-3zM9.5 2.5h3v11h-3z"/></svg>';
@@ -119,6 +119,14 @@
         },
         suspicion: cal ? { score: score, level: level.label, level_key: level.key } : null,
         verdict: num(c.verdict[i]) ? { label: m.verdicts[c.verdict[i]] } : null,
+        // Eyes, when this log recorded them (Oct 2026 onward). A null
+        // reading means the iris could not be read at that moment, which
+        // is not the same as "centred", so no eye beam is drawn for it.
+        eye: (m.eye_recorded && c.eye && vis && num(c.eye[i]))
+          ? { offset: c.eye[i], baseline: num(c.ebase[i]) ? c.ebase[i] : 0,
+              calibrated: !!c.ecal[i], aside: !!c.easide[i],
+              direction: c.easide[i] ? (c.eye[i] - (c.ebase[i] || 0) < 0 ? "Eyes Left" : "Eyes Right") : null }
+          : null,
         // The spread of pitch was never logged, so its threshold is unknown:
         // the pitch fan stays hidden rather than being guessed.
         pitch: m.pitch_recorded
@@ -244,7 +252,16 @@
   }
 
   // ── Loading ───────────────────────────────────────────────────────
+  // The list was fetched ONCE, when the dashboard page first loaded, and
+  // never again. Open the dashboard at the start of an exam and the
+  // session that is running appears in it as "00:01 · 0.1 MB" — and stays
+  // that way, while every recording made afterwards is missing, until the
+  // whole page is reloaded. So it is fetched again each time the Review
+  // page is shown, and the choice the person already made is kept.
+  let lastListAt = 0;
   function loadSessions() {
+    lastListAt = Date.now();
+    const keep = R.session.value;
     fetch("/api/replay/sessions")
       .then(function (r) { return r.json(); })
       .then(function (res) {
@@ -262,9 +279,18 @@
         sessions.forEach(function (s) {
           const o = document.createElement("option");
           o.value = s.id;
-          o.textContent = s.started + " · " + clock(s.duration_sec) + " · " + s.size_mb + " MB";
+          o.textContent = s.started + " · " + clock(s.duration_sec) + " · " + s.size_mb + " MB" +
+            (s.recording ? " · recording now" : "");
           R.session.appendChild(o);
         });
+        if (keep && sessions.some(function (s) { return s.id === keep; })) R.session.value = keep;
+        else {
+          // Nothing chosen yet: offer the newest FINISHED session, not the
+          // one still being written, which is what people mean by "the
+          // one I just did".
+          const done = sessions.find(function (s) { return !s.recording; });
+          if (done) R.session.value = done.id;
+        }
         R.open.disabled = false;
       })
       .catch(function () { setText(R.status, "Could not list recorded sessions."); });
@@ -326,7 +352,11 @@
   // Returning to the Review page redraws the paused frame (dashboard.js
   // announces every page change).
   document.addEventListener("examonitor:page", function () {
-    setTimeout(function () { if (P.data && pageActive()) twin.update(stateAt(P.idx)); }, 60);
+    setTimeout(function () {
+      if (P.data && pageActive()) twin.update(stateAt(P.idx));
+      // Re-list recordings on arriving at Review, at most every 5 s.
+      if (pageActive() && Date.now() - lastListAt > 5000) loadSessions();
+    }, 60);
   });
   // Space plays / pauses; arrows step a paused replay by one sample (a
   // quarter-second of the session), Shift + arrow by ten seconds.

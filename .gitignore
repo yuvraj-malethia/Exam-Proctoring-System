@@ -1,8 +1,8 @@
 # Python
 venv/
+.venv/
 __pycache__/
 *.py[cod]
-*.pyo
 
 # Environment / secrets
 .env
@@ -10,19 +10,25 @@ __pycache__/
 *.key
 *.pem
 
-# IDE
+# Dashboard accounts and sign-in log (password hashes, signing key)
+access/
+
+# Recordings and generated output (may contain faces)
+clips/
+study/
+demo/
+evidence/
+reports/
+video_results/
+diagnostics/
+research/results/
+
+# Local notes and backups
+archive/
+CLAUDE.md
+
+# IDE / OS
 .vscode/
 .idea/
-
-# OS
 .DS_Store
 Thumbs.db
-
-# Project archives / old versions
-archive/
-
-# Large diagnostic profile logs
-diagnostics/profile_*.jsonl
-
-# Generated session evidence
-evidence/

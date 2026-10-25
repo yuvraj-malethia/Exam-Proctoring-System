@@ -46,6 +46,22 @@
     { key: "duration",  label: "Share of time spent away" },
     { key: "session",   label: "Session memory" },
   ];
+  // The same five signals, named as the code names them. The Students
+  // page says what they mean in words; the Developer page is where
+  // somebody asks "how is this number actually computed?" and deserves
+  // the variable, the Config constant and the weight, not a paraphrase.
+  const TECH_SIGNALS = [
+    { key: "position",  v: "pos_score",  c: "W_POSITION",
+      note: "angular deviation from baseline, as a z-score, capped at K_SIGMA x 2.5" },
+    { key: "velocity",  v: "vel_score",  c: "W_VELOCITY",
+      note: "angular velocity, normalised (KinematicAnalyzer.velocity_norm)" },
+    { key: "frequency", v: "freq_score", c: "W_FREQUENCY",
+      note: "events inside TEMPORAL_WINDOW_SEC" },
+    { key: "duration",  v: "dur_score",  c: "W_DURATION",
+      note: "away time divided by session time" },
+    { key: "session",   v: "sess_score", c: "W_SESSION",
+      note: "decayed memory of past events (SESSION_MEMORY_HALFLIFE_SEC)" },
+  ];
   const PIPELINE = [
     "Camera", "Raw yaw", "Kalman", "Filtered yaw", "Baseline / z",
     "Forward / away", "Event", "Temporal", "Session memory",
@@ -124,7 +140,7 @@
     looks: [], serverEvents: [], prevEventsRaw: [], seq: 0,
     logFilter: "all",
     devLog: [],
-    built: {}, refs: {}, shapes: {}, sigs: {},
+    built: {}, refs: {}, shapes: {}, sigs: {}, roomHist: [], eyeHist: {},
     lastChartAt: 0,
     user: null, loginEnabled: true, modeToggleable: false,
   };
@@ -399,6 +415,21 @@
       show(b, true);
       return;
     }
+    // A run that is failing frames outranks everything below: the
+    // numbers on screen may be missing most of the session, and the one
+    // thing worse than showing nothing is showing a confident empty
+    // room. See frame_faults.py for the bug that taught this.
+    const flt = sys.faults;
+    if (flt && flt.degraded) {
+      setData(b, "kind", "stale");
+      setText($("banner-stamp"), "Degraded");
+      setText($("banner-text"),
+        Math.round(flt.fraction * 100) + "% of frames failed to process (" +
+        flt.failed + " of " + flt.frames + "). What is shown may be missing most " +
+        "of the session. See the Developer page for the cause.");
+      show(b, true);
+      return;
+    }
     if (sys.replay) {
       const r = sys.replay;
       setData(b, "kind", "replay");
@@ -458,7 +489,46 @@
   // ═══════════════════════════════════════════════════════════════
   // INGEST — per-tick bookkeeping, before rendering
   // ═══════════════════════════════════════════════════════════════
+  // A rolling history of how much of the room was away, kept in the
+  // browser because the engine sends only the current frame's figure.
+  // This is what the chart's second line is drawn from: an individual
+  // score means little until you can see it against what everyone else
+  // was doing at the same moment.
+  function ingestRoom(state) {
+    const r = (state.system && state.system.room) || null;
+    if (!r) return;
+    const now = performance.now();
+    App.roomHist.push({ at: now, pct: (r.away_fraction || 0) * 100, shared: !!r.shared });
+    const win = ((state.config && state.config.risk_timeline &&
+                  state.config.risk_timeline.window_sec) || 300) * 1000;
+    while (App.roomHist.length && now - App.roomHist[0].at > win) App.roomHist.shift();
+  }
+
+  // A rolling 20-second history of each student's eye position, kept in
+  // the browser because the engine sends only the current frame. This is
+  // what the eye strip under the head graph is drawn from. A reading of
+  // null is stored too: "the iris could not be read" is information (head
+  // down, blink, face too small), and must show as a gap in the line
+  // rather than as the eyes sitting dead centre.
+  function ingestEyes(state) {
+    const now = performance.now() / 1000;
+    SEATS.forEach(function (l) {
+      const p = students(state)[l];
+      if (!p) return;
+      const h = App.eyeHist[l] || (App.eyeHist[l] = []);
+      const e = p.eye;
+      if (p.visible && e && isNum(e.offset)) {
+        h.push({ t: now, v: e.offset - (isNum(e.baseline) ? e.baseline : 0), aside: !!e.aside });
+      } else if (p.visible && h.length && h[h.length - 1].v !== null) {
+        h.push({ t: now, v: null, aside: false });
+      }
+      while (h.length && now - h[0].t > 20) h.shift();
+    });
+  }
+
   function ingest(state, prev) {
+    ingestRoom(state);
+    ingestEyes(state);
     // Looks away: reconstructed from the engine's event count, as before.
     if (prev && prev.students) {
       SEATS.forEach(function (label) {
@@ -557,6 +627,8 @@
   function renderLive(state) {
     renderHall(state);
     renderCorrelations(state);
+    renderEvidence(state);
+    renderBlind(state);
     renderIdentityReviews(state);
     renderSeats(state);
     renderCamera(state);
@@ -626,6 +698,18 @@
     if (groups["break"].length) rest.push(listWords(plain(groups["break"])) + " on a break");
     if (groups.away.length) rest.push(listWords(plain(groups.away)) + " out of view");
     if (rest.length) sub.push(cap(rest.join("; ")) + ".");
+    // A seat the engine cannot read belongs in the headline summary, not
+    // only in its own callout: the one-sentence line is what an
+    // invigilator glances at, and "nothing needs you right now" would be
+    // a lie while a seat has gone unread for half a minute.
+    const blindNow = (sys.unmeasured || []).filter(function (u) { return u.sec >= 3; });
+    if (blindNow.length) {
+      sub.push(listWords(blindNow.map(function (u) {
+        const q = students(state)[u.label];
+        return esc(q ? nameOf(q) : u.label);
+      })) + (blindNow.length === 1 ? " cannot be seen" : " cannot be seen") +
+        " (" + fmtDur(blindNow[0].sec) + ").");
+    }
 
     setHTML($("hall-line"), line);
     setHTML($("hall-sub"), sub.join('<span class="sep">·</span>'));
@@ -659,6 +743,75 @@
   }
 
   // ── Between students ─────────────────────────────────────────
+  // ── Seats the engine cannot read ─────────────────────────────
+  // Visibility, not suspicion. A student writing with their head low
+  // disappears from a webcam just as surely as one looking into their
+  // lap, so this says what happened and leaves the judgement alone.
+  // Before this existed a seat could go unread for half a minute and
+  // the page would show nothing at all.
+  function renderBlind(state) {
+    const panel = $("blind-panel"), list = $("blind-list");
+    const sys = state.system || {};
+    const items = sys.unmeasured || [];
+    const sig = items.map(function (u) { return u.sid + ":" + Math.round(u.sec) + ":" + u.body_seen; }).join(",");
+    if (sig === App.sigs.blind) return;
+    App.sigs.blind = sig;
+    show(panel, items.length > 0);
+    if (!items.length) { list.innerHTML = ""; return; }
+    list.innerHTML = items.map(function (u) {
+      const who = (students(state)[u.label] ? nameOf(students(state)[u.label]) : u.label);
+      let body = "";
+      if (u.body_seen === true) body = "Someone is still sitting there.";
+      else if (u.body_seen === false) body = "No one seen in that seat.";
+      return '<div class="finding">' +
+        '<p class="finding-title">' + esc(who) + '</p>' +
+        '<span class="finding-conf is-neutral">' + fmtDur(u.sec) + '</span>' +
+        '<p class="finding-desc">No readable face for ' + fmtDur(u.sec) +
+        (body ? " " + esc(body) : "") + '</p>' +
+      '</div>';
+    }).join("") + '<p class="caveat">Not a suspicion. Writing with the head low does this too — it means the engine has nothing to measure, so nothing about these seats has been checked.</p>';
+  }
+
+  // The snapshots evidence_capture.py saved, shown while the session is
+  // still running. Nothing new is computed here — the images already
+  // existed, they were just buried in Review where nobody looks during
+  // an exam. Signature-checked before rebuilding, like every panel that
+  // updates from the live stream.
+  function renderEvidence(state) {
+    const panel = $("evidence-panel"), list = $("evidence-list");
+    const shots = [];
+    seatOrder(state).forEach(function (l) {
+      const p = students(state)[l];
+      const e = p && p.latest_evidence;
+      if (e && e.image) shots.push({ p: p, e: e });
+    });
+    shots.sort(function (a, b) { return (b.e.timestamp || 0) - (a.e.timestamp || 0); });
+    const top = shots.slice(0, 3);
+    const sig = top.map(function (q) { return q.e.image; }).join(",");
+    if (sig === App.sigs.shots) return;
+    App.sigs.shots = sig;
+    show(panel, top.length > 0);
+    if (!top.length) { list.innerHTML = ""; return; }
+    list.innerHTML = top.map(function (q) {
+      const when = q.e.time || (q.e.timestamp ? fmtClockOfDay(q.e.timestamp) : "");
+      return '<figure class="shot">' +
+        '<a href="/evidence/' + encodeURI(q.e.image) + '" target="_blank" rel="noopener">' +
+        '<img src="/evidence/' + encodeURI(q.e.image) + '" alt="Saved frame for ' +
+        esc(nameOf(q.p)) + '" loading="lazy"></a>' +
+        '<figcaption><b>' + esc(nameOf(q.p)) + '</b>' +
+        (when ? '<span class="when">' + esc(String(when)) + '</span>' : '') +
+        (isNum(q.e.suspicion) ? '<span class="num">' + fmtNum(q.e.suspicion, 0) + '%</span>' : '') +
+        (q.e.reason ? '<span class="why">' + esc(q.e.reason) + '</span>' : '') +
+        '</figcaption></figure>';
+    }).join("") +
+      '<p class="caveat">A saved frame is a prompt to look, not a finding. ' +
+      'Open Review for the full record.</p>';
+  }
+
+  function fmtClockOfDay(ts) {
+    try { return new Date(ts * 1000).toLocaleTimeString(); } catch (e) { return ""; }
+  }
+
   function renderCorrelations(state) {
     const panel = $("correlation-panel"), list = $("correlation-list");
     const items = state.correlations || [];
@@ -754,10 +907,19 @@
           '<div class="seat-scoreline"><div class="seat-score">' + PEN_RING + '<span class="v" data-ref="score">—</span><span class="u">%</span></div>' +
           '<span class="peak" data-ref="peak"></span></div>' +
           '<div class="seat-now" data-ref="now"><span data-ref="nowText">—</span><span class="when" data-ref="nowWhen"></span></div>' +
+          // Said plainly on the card, because a seat the engine cannot
+          // read is the one case where the numbers above it mean
+          // nothing at all.
+          '<div class="seat-blind" data-ref="blind" hidden></div>' +
         '</div>' +
         '<div class="gaze is-idle" data-ref="gaze" aria-hidden="true">' +
           '<div class="gaze-dial"><div class="gaze-fan" data-ref="fan"></div></div>' +
-          '<div class="gaze-needle" data-ref="needle"></div><div class="gaze-head"></div>' +
+          '<div class="gaze-needle" data-ref="needle"></div>' +
+          // A second, shorter needle for where the EYES point. The long
+          // needle is the head; this one is what the head cannot tell
+          // you. Hidden entirely when eye tracking is off.
+          '<div class="gaze-eye" data-ref="eyeNeedle" hidden></div>' +
+          '<div class="gaze-head"></div>' +
           '<span class="gaze-down">DOWN</span>' +
         '</div>' +
       '</div>' +
@@ -862,11 +1024,34 @@
     setText(r.nowWhen, when);
     toggle(r.now, "is-away", away);
 
+    // Visibility (presence.py). Stated, never scored: the score and the
+    // verdict on this card were computed from whatever the engine could
+    // see, and right now that is nothing.
+    const pres = p.presence;
+    const blind = !!(pres && pres.reportable);
+    show(r.blind, blind);
+    toggle(r.card, "is-blind", blind);
+    if (blind) {
+      setText(r.blind, "No readable face for " + fmtDur(pres.current_sec) +
+        (pres.body_seen === true ? " · still seated"
+          : pres.body_seen === false ? " · seat looks empty" : ""));
+    }
+
     // Gaze dial
     const g = p.visible ? gazeOf(p) : { idle: true };
     setCls(r.gaze, "gaze" + (g.idle ? " is-idle" : "") + (g.away ? " is-away" : "") + (g.down ? " is-down" : ""));
     if (!g.idle) {
       setStyle(r.needle, "transform", "rotate(" + g.yawDeg.toFixed(1) + "deg)");
+      // Eyes. The offset is a percent of eye width, drawn one degree per
+      // percent, which puts a hard-over iris near the edge of the dial —
+      // about how far an eye can actually travel.
+      const hasEye = typeof g.eye === "number";
+      show(r.eyeNeedle, hasEye);
+      if (hasEye) {
+        const ed = Math.max(-45, Math.min(45, g.eye));
+        setStyle(r.eyeNeedle, "transform", "rotate(" + ed.toFixed(1) + "deg)");
+        toggle(r.eyeNeedle, "is-aside", !!g.eyeAside);
+      }
       const fan = g.fan ? "conic-gradient(from " + g.fan[0].toFixed(1) + "deg, var(--blue-soft) 0 " +
         (g.fan[1] - g.fan[0]).toFixed(1) + "deg, transparent 0)" : "none";
       setStyle(r.fan, "background", fan);
@@ -1006,6 +1191,22 @@
     out.push('<text class="chart-axis" x="' + pad.l + '" y="' + (H - 4) + '">−' + Math.round(win / 60) + ' min</text>');
     out.push('<text class="chart-axis" x="' + (pad.l + pw) + '" y="' + (H - 4) + '" text-anchor="end">now</text>');
 
+    // The room, drawn first so student lines sit on top of it. Dashed
+    // and in plain ink: it is context, not a student and not an alarm.
+    if (App.roomHist.length > 1) {
+      const now = performance.now();
+      const rd = App.roomHist.map(function (pt, i) {
+        return (i ? "L" : "M") + x((now - pt.at) / 1000).toFixed(1) + " " + y(pt.pct).toFixed(1);
+      }).join(" ");
+      out.push('<path class="chart-room" d="' + rd + '"/>');
+      // Label inside the plot at top-left, not in the right-hand margin:
+      // that margin already stacks one label per student and the room
+      // line would collide with whichever student happened to be near it.
+      const lastR = App.roomHist[App.roomHist.length - 1];
+      out.push('<text class="chart-room-label" x="' + (pad.l + 6) + '" y="' + (pad.t + 10) +
+        '">- - the room ' + Math.round(lastR.pct) + '% looking away</text>');
+    }
+
     const ends = [];
     seatOrder(state).forEach(function (l) {
       const p = students(state)[l];
@@ -1139,6 +1340,15 @@
       '<div class="insp-body">' +
         '<div class="insp-score"><span class="big" data-ref="score">—</span>' +
           '<div class="meta"><span data-ref="level">—</span><span class="muted" data-ref="peak"></span><span data-ref="now"></span></div></div>' +
+          // Visibility sits directly under the score on purpose: it is
+          // the one thing that can make every figure below it stale.
+          '<p class="insp-blind" data-ref="blind" hidden></p>' +
+          // Eyes, stated separately from the head, because the whole
+          // point of the signal is that the two can disagree.
+          '<p class="insp-eye" data-ref="eye" hidden></p>' +
+          // Context from the rest of the room, directly under the eye
+          // line: both answer "compared with what?".
+          '<p class="insp-room" data-ref="room" hidden></p>' +
         '<section class="insp-section"><h3 class="eyebrow">Why this verdict</h3><ul class="checks" data-ref="checks"></ul>' +
           '<p class="fine" style="margin-top:8px">A verdict counts how many of these four checks are met: none is OK, one WATCH, two ALERT, three or more FLAG. It is what triggers a saved snapshot.</p></section>' +
         '<section class="insp-section"><h3 class="eyebrow">Patterns</h3><div class="patterns-list" data-ref="patterns"></div></section>' +
@@ -1182,10 +1392,84 @@
     setText(r.level, cal && p.suspicion ? p.suspicion.level + " suspicion score" : "Not scored until calibrated");
     setText(r.peak, cal && p.suspicion ? "Peak " + fmtNum(p.suspicion.peak, 0) + "% this session" : "");
     setText(r.now, p.visible ? directionText(p) : "Not in view");
+    // Said here above everything else: when the engine cannot read this
+    // face, every number in this drawer is from the last moment it
+    // could, and the checks below have had nothing to work with since.
+    const ipres = p.presence;
+    const iblind = !!(ipres && ipres.reportable);
+    show(r.blind, iblind || !!(ipres && ipres.total_unmeasured_sec));
+    if (ipres) {
+      // What the hands were doing, when the body check is running and
+      // saw them. Stated as description, never as a finding: the
+      // measurements behind it are explicitly not a detector (see
+      // body_presence.py).
+      const hs = ipres.hands;
+      let hnote = "";
+      if (hs) {
+        if (hs.visibility < 0.10) hnote = " Their hands were out of view.";
+        else if (hs.near_face < 1.5) hnote = " Their hands were up near their face.";
+        else if (hs.height > 1.3) hnote = " Their hands were low, around desk height.";
+        else hnote = " Their hands were in front of them.";
+      }
+      setText(r.blind, iblind
+        ? ("No readable face for " + fmtDur(ipres.current_sec) +
+           (ipres.body_seen === true ? " — someone is still sitting there."
+            : ipres.body_seen === false ? " — no one seen in that seat." : ".") +
+           hnote +
+           " The figures below are from before that.")
+        : ("Unreadable for " + fmtDur(ipres.total_unmeasured_sec) + " in total this session" +
+           (ipres.longest_unmeasured_sec ? ", longest " + fmtDur(ipres.longest_unmeasured_sec) : "") + "."));
+    }
     const brk = r.brk, onBreak = !!(info && info.on_break);
     setText(brk, onBreak ? "End break" : "Mark on break");
     toggle(brk, "is-on", onBreak);
     brk.disabled = !!(state.system && state.system.mock) || !state.identity;
+
+    // Eyes (eye_gaze.py). Hidden entirely when eye tracking is off, so
+    // the drawer never implies a measurement that was not taken.
+    const eye = p.eye;
+    show(r.eye, !!eye);
+    if (eye) {
+      let txt;
+      if (!eye.calibrated) {
+        txt = "Eyes: still learning where this student's eyes normally rest.";
+      } else {
+        const off = (eye.offset || 0) - (eye.baseline || 0);
+        const voff = (eye.down_offset || 0) - (eye.down_baseline || 0);
+        // Whichever axis moved further names the look, the same rule the
+        // engine uses to label the event.
+        const vertical = Math.abs(voff) > Math.abs(off);
+        const amount = vertical ? Math.abs(voff) : Math.abs(off);
+        const side = vertical ? (voff > 0 ? "below" : "above") : (off < 0 ? "left" : "right");
+        txt = amount < 4
+          ? "Eyes resting where they normally do."
+          : "Eyes " + Math.round(amount) + "% of an eye-width " + side +
+            " where they normally rest.";
+        if (eye.aside) {
+          txt += vertical
+            ? " The head is level — this is a look down that head angle alone would not show."
+            : " The head is forward — this is a look the head alone would not show.";
+        }
+      }
+      setText(r.eye, txt);
+      toggle(r.eye, "is-aside", !!eye.aside);
+    }
+
+    // Room context (room_context.py). The one thing a per-student score
+    // cannot say on its own: was everyone else doing this too?
+    const rm = p.room;
+    show(r.room, !!rm);
+    if (rm) {
+      const pct = Math.round(rm.away_fraction * 100);
+      setText(r.room, rm.shared
+        ? ("Most of the room was looking away at the same moment (" + pct +
+           "% of " + rm.others + " others). This counted for less than the same " +
+           "glance made alone.")
+        : (pct === 0
+            ? "Nobody else in the room was looking away at the same moment."
+            : pct + "% of the other " + rm.others + " students were also looking away."));
+      toggle(r.room, "is-shared", !!rm.shared);
+    }
 
     // Checks — rebuilt only when their outcome or values change.
     const checks = (p.verdict && p.verdict.checks) || [];
@@ -1508,6 +1792,7 @@
     setHTML(r.narrative, narrative(p));
     updateBars(r.barRows, p);
     drawYawGraph(r.graphCanvas, p);
+    drawEyePanel(r, p);
     const evs = (p.temporal && p.temporal.recent_events) || [];
     const esig = evs.length + (evs[0] ? evs[0].time + evs[0].duration : "");
     if (r._esig !== esig) {
@@ -1559,34 +1844,63 @@
     if (s.peak >= levelsCfg(App.state).high) out.push("The score reached HIGH RISK at least once (peak " + n(fmtNum(s.peak, 0) + "%") + ").");
     return out.join(" ");
   }
-  function buildBars(root) {
+  function buildBars(root, tech) {
     const rows = {};
-    root.innerHTML = SIGNALS.map(function (s) {
-      return '<div class="bar-row" data-bar="' + s.key + '"><div class="bar-top"><span>' + esc(s.label) + '<span class="w"></span></span><span class="v">—</span></div>' +
-        '<div class="bar-track"><div class="bar-fill"></div></div></div>';
+    const list = tech ? TECH_SIGNALS : SIGNALS;
+    root.innerHTML = list.map(function (s) {
+      const head = tech
+        ? '<code class="sig-var">' + esc(s.v) + '</code><span class="sig-note">' + esc(s.note) + "</span>"
+        : esc(s.label);
+      return '<div class="bar-row' + (tech ? " is-tech" : "") + '" data-bar="' + s.key + '">' +
+        '<div class="bar-top"><span>' + head + '<span class="w"></span></span><span class="v">—</span></div>' +
+        '<div class="bar-track"><div class="bar-fill"></div></div>' +
+        (tech ? '<div class="sig-foot"><span class="sig-const">' + esc(s.c) + '</span><span class="sig-contrib"></span></div>' : "") +
+        "</div>";
     }).join("");
-    SIGNALS.forEach(function (s) {
+    list.forEach(function (s) {
       const row = root.querySelector('[data-bar="' + s.key + '"]');
-      rows[s.key] = { w: row.querySelector(".w"), v: row.querySelector(".v"), fill: row.querySelector(".bar-fill") };
+      rows[s.key] = { w: row.querySelector(".w"), v: row.querySelector(".v"),
+                      fill: row.querySelector(".bar-fill"),
+                      contrib: row.querySelector(".sig-contrib") };
     });
+    rows._tech = !!tech;
     return rows;
   }
   function updateBars(rows, p) {
     const w = (window.CONFIG && window.CONFIG.weights) || {};
-    SIGNALS.forEach(function (s) {
+    const tech = !!rows._tech;
+    (tech ? TECH_SIGNALS : SIGNALS).forEach(function (s) {
       const r = rows[s.key], v = p.signals ? p.signals[s.key] : 0;
-      setText(r.w, isNum(w[s.key]) ? "weight " + Math.round(w[s.key] * 100) + "%" : "");
+      setText(r.w, isNum(w[s.key])
+        ? (tech ? "= " + w[s.key].toFixed(2) : "weight " + Math.round(w[s.key] * 100) + "%")
+        : "");
       setText(r.v, fmtPct(v));
       setStyle(r.fill, "width", Math.max(0, Math.min(100, v || 0)) + "%");
       const k = riskKey(v || 0);
       setStyle(r.fill, "background", k === "normal" ? "var(--ink-3)" : "var(--c-" + k + ")");
+      // What this signal actually puts into the final number, so the
+      // five bars visibly add up to the score instead of being five
+      // unrelated percentages.
+      if (tech && r.contrib) {
+        setText(r.contrib, isNum(w[s.key])
+          ? "contributes " + fmtNum((w[s.key] * (v || 0)), 1) + " of " + fmtNum(p.suspicion ? p.suspicion.score : 0, 1)
+          : "");
+      }
     });
   }
 
   // ── Yaw graph (canvas) ───────────────────────────────────────
   function graphHTML() {
     return '<div class="graph-wrap"><canvas class="graph-canvas" data-ref="graphCanvas"></canvas><div class="graph-tip" data-ref="graphTip"></div></div>' +
-      '<p class="fine" style="margin-top:8px">Blue is their calibrated straight-ahead; the shaded edges are where the engine counts a look as "away".</p>';
+      '<p class="fine" style="margin-top:8px">Blue is their calibrated straight-ahead; the shaded edges are where the engine counts a look as "away".</p>' +
+      // The eyes, drawn apart from the head because the whole point of
+      // tracking them is that the two can disagree. Hidden entirely when
+      // eye tracking is off, so nobody is shown a graph of nothing.
+      '<div class="graph-eye" data-ref="eyeWrap" hidden>' +
+        '<p class="eyebrow graph-eye-title">Eyes, left and right</p>' +
+        '<div class="graph-wrap graph-wrap--eye"><canvas class="graph-canvas" data-ref="graphEye"></canvas></div>' +
+        '<p class="fine" data-ref="eyeNote"></p>' +
+      '</div>';
   }
   function bindGraph(r) {
     const c = r.graphCanvas, tip = r.graphTip;
@@ -1659,6 +1973,76 @@
       graph.forEach(function (q) { const d = Math.abs(q.t - t); if (d < bd) { bd = d; best = q; } });
       return best;
     };
+  }
+
+  // The eye strip. Units are PERCENT OF EYE WIDTH from this student's own
+  // resting eye position, which is not degrees, so it gets its own axis
+  // rather than being squeezed onto the head graph's. Dashed pen lines
+  // are the engine's absolute floor (Config.EYE_MIN_OFFSET): the eyes
+  // must move at least that far, and well past their own wobble, to
+  // count. Teal is the same eye colour the 3D room uses; a stretch the
+  // engine actually counted as "eyes aside" turns pen red.
+  function drawEyeGraph(canvas, hist, floor) {
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width) return;
+    const dpr = window.devicePixelRatio || 1, w = rect.width, h = rect.height || 96;
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    const C = { rule: cssVar("--rule"), ink3: cssVar("--ink-3"), blue: cssVar("--blue"),
+                pen: cssVar("--pen"), penSoft: cssVar("--pen-soft"),
+                eye: cssVar("--room-eye") || cssVar("--blue"), mono: cssVar("--font-mono") };
+    const vals = hist.filter(function (q) { return q.v !== null; }).map(function (q) { return Math.abs(q.v); });
+    const R = Math.max(floor * 2.2, (vals.length ? Math.max.apply(null, vals) : 0) * 1.15);
+    const now = performance.now() / 1000, span = 20, pw = w - 48;
+    const X = function (t) { return Math.max(0, ((t - (now - span)) / span) * pw); };
+    const Y = function (v) { return h / 2 - (v / R) * (h / 2); };
+    ctx.fillStyle = C.penSoft;
+    ctx.fillRect(0, 0, w, Y(floor));
+    ctx.fillRect(0, Y(-floor), w, h - Y(-floor));
+    ctx.strokeStyle = C.pen; ctx.globalAlpha = 0.5; ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+    [floor, -floor].forEach(function (v) { ctx.beginPath(); ctx.moveTo(0, Y(v)); ctx.lineTo(w, Y(v)); ctx.stroke(); });
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+    ctx.strokeStyle = C.blue; ctx.lineWidth = 1.5; ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.moveTo(0, Y(0)); ctx.lineTo(w, Y(0)); ctx.stroke(); ctx.setLineDash([]);
+    ctx.lineWidth = 1.8; ctx.lineJoin = "round";
+    for (let i = 1; i < hist.length; i++) {
+      const a = hist[i - 1], b = hist[i];
+      if (a.v === null || b.v === null) continue;     // a gap, not a zero
+      ctx.strokeStyle = b.aside ? C.pen : C.eye;
+      ctx.beginPath(); ctx.moveTo(X(a.t), Y(a.v)); ctx.lineTo(X(b.t), Y(b.v)); ctx.stroke();
+    }
+    const last = hist[hist.length - 1];
+    if (last && last.v !== null) {
+      ctx.fillStyle = last.aside ? C.pen : C.eye;
+      ctx.beginPath(); ctx.arc(X(last.t), Y(last.v), 3.5, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = C.ink3; ctx.font = "500 10px " + C.mono; ctx.textAlign = "right";
+    ctx.fillText("+" + Math.round(R) + "%", w - 4, 12);
+    ctx.fillText("\u2212" + Math.round(R) + "%", w - 4, h - 4);
+  }
+
+  // Shows or hides the eye strip and says why when there is nothing in it.
+  function drawEyePanel(r, p) {
+    if (!r.eyeWrap) return;
+    const cfgE = (App.state && App.state.config && App.state.config.eye) || null;
+    const on = !!(cfgE && cfgE.enabled);
+    show(r.eyeWrap, on);
+    if (!on) return;
+    const hist = App.eyeHist[p.label] || [];
+    const has = hist.some(function (q) { return q.v !== null; });
+    show(r.graphEye.parentNode, has);
+    if (has) drawEyeGraph(r.graphEye, hist, isNum(cfgE.min_offset) ? cfgE.min_offset : 12);
+    setText(r.eyeNote, has
+      ? "Teal is where the eyes point, measured from their normal resting position in percent of eye width. " +
+        "Red means the engine counted it as eyes aside while the head was forward. " +
+        "Gaps mean the iris could not be read (head down, a blink, or the face too small)."
+      : "No readable iris in the last 20 seconds. Eyes cannot be read while the head is down, " +
+        "for example when writing, so nothing is drawn rather than guessing.");
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -1779,14 +2163,20 @@
             kvPane("Temporal", "Event engine", "dt", [["state", "State"], ["dur", "Current away"], ["win", "Events in window"], ["ws", "Window"], ["tot", "Total events"], ["away", "Total away"], ["ratio", "Away ratio (raw)"], ["fs", "Frequency score"], ["ds", "Duration score"], ["ss", "Session score"]]) +
             kvPane("Fusion", "Suspicion", "df", [["score", "Score"], ["peak", "Peak"], ["conf", "Confirmed time"], ["alpha", "EMA alpha"], ["cthr", "Confirmed threshold"], ["level", "Level"], ["verdict", "Verdict"]]) +
           "</div>" +
-          '<div class="grid-2" style="margin-top:18px"><section class="pane"><header class="pane-head"><div><p class="eyebrow">Signals</p><h2 class="pane-title">Fusion inputs</h2></div></header><div class="bars" data-ref="bars"></div></section>' +
+          '<div class="grid-2" style="margin-top:18px"><section class="pane"><header class="pane-head"><div><p class="eyebrow">Signals</p><h2 class="pane-title">Fusion inputs</h2></div></header><div class="bars" data-ref="bars"></div>' +
+            '<p class="formula">probability = W_POSITION&middot;pos_score + W_VELOCITY&middot;vel_score + W_FREQUENCY&middot;freq_score + W_DURATION&middot;dur_score + W_SESSION&middot;sess_score, then smoothed by SUSPICION_EMA_ALPHA (suspicion.py).</p>' +
+            // Where the away events came from. The score deliberately
+            // mixes the three sources, so this is the only place that
+            // answers "how much of it was the eyes?".
+            '<div class="srcs" data-ref="srcs"></div></section>' +
           '<section class="pane"><header class="pane-head"><div><p class="eyebrow">Yaw</p><h2 class="pane-title">Kalman-smoothed, last 20 s</h2></div></header>' + graphHTML() + "</section></div>"
           : '<div class="state-note" style="margin-top:18px"><h3>Awaiting calibration</h3><p>Stage values fill in once ' + esc(nameOf(p)) + " is calibrated.</p></div>") +
         '<section class="pane" style="margin-top:18px"><details class="fold" data-ref="jsonFold"><summary><span><span class="eyebrow">Payload</span><span class="pane-title" style="display:block">Raw JSON for this student</span></span><span class="num muted" data-ref="jsonSize">—</span></summary>' +
           '<pre class="json" data-ref="json"></pre></details></section>' +
+        '<section class="pane"><header class="pane-head"><div><p class="eyebrow">Health</p><h2 class="pane-title">Errors the engine swallowed</h2></div></header><div data-ref="faults"></div></section>' +
         '<section class="pane"><header class="pane-head"><div><p class="eyebrow">Stream</p><h2 class="pane-title">Last updates received</h2></div></header><ul class="devlog" data-ref="devlog"></ul></section>';
       App.refs.dev = refsOf(box);
-      if (App.refs.dev.bars) App.refs.dev.barRows = buildBars(App.refs.dev.bars);
+      if (App.refs.dev.bars) App.refs.dev.barRows = buildBars(App.refs.dev.bars, true);
       if (App.refs.dev.graphCanvas) bindGraph(App.refs.dev);
     }
     const r = App.refs.dev;
@@ -1811,6 +2201,66 @@
     setText(r.m_time, fmtClock(sys.session_time));
     setText(r.m_ev, cal ? fmtInt(t.total_events) : "—");
     setText(r.m_log, String(App.devLog.length));
+
+    // Errors a per-frame except caught and carried on from. Signature-
+    // checked before rebuilding, like every other panel here.
+    if (r.faults) {
+      const flt = sys.faults;
+      const fsig = flt ? [flt.failed, flt.subsystem, flt.distinct].join("-") : "off";
+      if (r._fsig !== fsig) {
+        r._fsig = fsig;
+        if (!flt) {
+          r.faults.innerHTML = '<p class="fine">Not tracked in this mode.</p>';
+        } else if (!flt.failed && !flt.subsystem) {
+          r.faults.innerHTML = '<p class="fine ok-note">No frame raised an error this session. ' +
+            fmtInt(flt.frames) + ' frames processed.</p>';
+        } else {
+          r.faults.innerHTML =
+            '<p class="' + (flt.degraded ? "fault-head is-bad" : "fault-head") + '">' +
+              (flt.degraded ? "Run degraded — " : "") +
+              fmtInt(flt.failed) + ' of ' + fmtInt(flt.frames) + ' frames lost (' +
+              Math.round(flt.fraction * 1000) / 10 + '%)' +
+              (flt.subsystem ? ', ' + fmtInt(flt.subsystem) + ' subsystem errors' : '') +
+            '</p>' +
+            (flt.degraded ? '<p class="fine">Enough frames failed that the figures on this ' +
+              'dashboard may be missing most of the session.</p>' : '') +
+            '<ul class="fault-list">' + (flt.faults || []).map(function (q) {
+              return '<li><span class="fault-n">' + fmtInt(q.count) + '&times;</span>' +
+                '<code>' + esc(q.signature) + '</code>' +
+                '<span class="fine">frames ' + q.first_frame + '–' + q.last_frame + '</span></li>';
+            }).join("") + '</ul>';
+        }
+      }
+    }
+
+    // Where the away events came from. Rebuilt only when the counts
+    // change — this panel updates on the ~8 Hz stream and rebuilding it
+    // every tick is the flicker bug this project has hit before.
+    if (r.srcs) {
+      const src = (t && t.event_sources) || null;
+      const ssig = src ? [src.head, src.down, src.eyes].join("-") : "none";
+      if (r._srcSig !== ssig) {
+        r._srcSig = ssig;
+        if (!src || !src.total) {
+          r.srcs.innerHTML = '<p class="fine">No away events yet. When there are, this says which signal raised each one.</p>';
+        } else {
+          const parts = [
+            ["head", "Head turned", src.head, "yaw past K_SIGMA x std"],
+            ["down", "Looked down", src.down, "pitch past PITCH_K_SIGMA and PITCH_MIN_DOWN_DEG"],
+            ["eyes", "Eyes aside", src.eyes, "eye offset past EYE_K_SIGMA, head still forward"],
+          ];
+          r.srcs.innerHTML = '<p class="eyebrow">Where the ' + plural(src.total, "away event") + ' came from</p>' +
+            parts.map(function (q) {
+              const pct = src.total ? Math.round(100 * q[2] / src.total) : 0;
+              return '<div class="src-row' + (q[2] ? "" : " is-zero") + '"><span class="src-k">' + esc(q[1]) +
+                '</span><span class="src-n">' + q[2] + '</span>' +
+                '<div class="src-bar"><i style="width:' + pct + '%"></i></div>' +
+                '<span class="src-why">' + esc(q[3]) + "</span></div>";
+            }).join("") +
+            '<p class="fine">An eye glance is routed through the same five signals above, exactly as a head turn is — it has no separate weight. This is the only place that separates them.</p>';
+        }
+      }
+    }
     if (cal) {
       const k = p.kinematics || {};
       setText(r.dk_vel, fmtNum(k.velocity, 1, "°/s")); setText(r.dk_maxv, fmtNum(k.max_velocity, 1, "°/s"));
@@ -1825,6 +2275,7 @@
       setText(r.df_verdict, p.verdict ? p.verdict.label + " (" + p.verdict.evidence + "/4)" : "—");
       updateBars(r.barRows, p);
       drawYawGraph(r.graphCanvas, p);
+      drawEyePanel(r, p);
     }
     const json = JSON.stringify(p, null, 2);
     setText(r.jsonSize, (json.length / 1024).toFixed(1) + " KB");
@@ -1964,10 +2415,19 @@
           "highest " + r.highest_verdict + " · peak " + fmtNum(r.peak_score, 0) + "% · " + plural(r.events, "look") + " away" +
           (r.face_seen_pct < 90 ? " · face seen " + fmtNum(r.face_seen_pct, 0) + "%" : "") +
           (r.patterns && r.patterns.length ? " · " + r.patterns.slice(0, 2).join(", ") : "");
+        // How much of the clip had no readable face. Shown on its own
+        // line, not folded into the facts above, because "not flagged"
+        // on a clip the engine mostly could not read means something
+        // completely different from "not flagged" on one it could.
+        const unm = r.unmeasured_sec || 0;
+        const blind = unm > 0 ? '<span class="vblind">Could not read a face for ' +
+          fmtNum(unm, 0) + "s of " + fmtNum(r.footage_sec || 0, 0) + "s" +
+          (r.longest_unmeasured_sec ? " · longest " + fmtNum(r.longest_unmeasured_sec, 0) + "s" : "") +
+          "</span>" : "";
         return '<div class="vrow"><div class="vclip"><b title="' + esc(r.clip) + '">' + esc(r.clip.replace(/\.[^.]+$/, "")) + "</b>" +
           (r.note ? "<span>" + esc(r.note) + "</span>" : "") + "</div>" +
           '<span class="vlabel' + (r.label === "suspicious" ? " is-suspicious" : "") + '">' + esc(r.label === "suspicious" ? "Cheating" : r.label === "innocent" ? "Normal" : "No label") + "</span>" +
-          '<div class="vbar-wrap">' + verdictBar(r.seconds_per_verdict || {}) + '<span class="vfacts">' + esc(facts) + "</span></div>" +
+          '<div class="vbar-wrap">' + verdictBar(r.seconds_per_verdict || {}) + '<span class="vfacts">' + esc(facts) + "</span>" + blind + "</div>" +
           '<div class="vout"><span class="stamp" data-v="' + v + '">' + (v === "MATCH" ? "As recorded" : v === "DIFFERS" ? "Differs" : v === "ERROR" ? "Error" : "—") + "</span>" +
           '<span class="fine">' + (err ? "" : r.flagged ? "flagged for review" : "not flagged") + "</span></div></div>";
       }).join("");

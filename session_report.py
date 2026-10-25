@@ -144,7 +144,7 @@ class SessionReportBuilder:
     def __init__(self, students, verdicts, patterns_by_slot, correlations,
                  event_logger=None, archive=None, evidence_dir=None,
                  score_logs=None, session_id="session", session_start=None,
-                 roster=None):
+                 roster=None, presence=None):
         self.students = students
         self.verdicts = verdicts or {}
         self.patterns = patterns_by_slot or {}
@@ -156,6 +156,11 @@ class SessionReportBuilder:
         self.session_id = session_id
         self.session_start = session_start
         self.roster = roster
+        # presence.PresenceTracker, optional. Carries how long each seat
+        # could not be read at all. A report that lists a peak score for
+        # a student the camera could not see for a third of the exam,
+        # without saying so, is a misleading report.
+        self.presence = presence
         # Apply registered names immediately at construction rather than
         # during build(), so any analysis the caller runs against these
         # students afterwards already refers to people rather than seats.
@@ -268,7 +273,7 @@ class SessionReportBuilder:
 
     def _risk_table(self, t):
         rows = [["Student", "Assessment", "Peak", "Events", "Away time",
-                 "Recommended action"]]
+                 "Not seen", "Recommended action"]]
         styles = [
             ("BACKGROUND", (0, 0), (-1, 0), _BG_ALT),
             ("TEXTCOLOR", (0, 0), (-1, 0), _INK),
@@ -286,11 +291,22 @@ class SessionReportBuilder:
             v = self.verdicts.get(sid, "CALIBRATING")
             action, _ = self.narrator.recommendation(
                 st, self.patterns.get(sid) or [], v)
+            # "Not seen" is time the engine had no measurable face at
+            # all — not time the student spent looking away, which is
+            # the column beside it. The two mean opposite things: away
+            # time was measured, this was not.
+            unseen = "-"
+            if self.presence is not None:
+                _p = self.presence.payload(sid, t) or {}
+                _tot = _p.get("total_unmeasured_sec") or 0.0
+                if _tot:
+                    unseen = f"{_tot:.0f}s"
             rows.append([
                 _name(st), v,
                 f"{st.fs.max_probability:.0f}%" if st.calib.is_calibrated else "-",
                 str(st.temporal.total_count()),
                 f"{st.temporal.total_away_s:.1f}s",
+                unseen,
                 action,
             ])
             styles.append(("TEXTCOLOR", (1, i), (1, i),
@@ -299,10 +315,14 @@ class SessionReportBuilder:
             if i % 2 == 0:
                 styles.append(("BACKGROUND", (0, i), (-1, i),
                                colors.HexColor("#fbfcfd")))
-        tbl = Table(rows, colWidths=[20 * mm, 26 * mm, 15 * mm, 16 * mm,
-                                      22 * mm, 75 * mm], repeatRows=1)
+        tbl = Table(rows, colWidths=[20 * mm, 24 * mm, 14 * mm, 14 * mm,
+                                      20 * mm, 18 * mm, 64 * mm], repeatRows=1)
         tbl.setStyle(TableStyle(styles))
         return [_P("Summary of all students", self.s["h1"]), tbl,
+                _P("\"Not seen\" is time when no face could be measured at all — the "
+                   "head was turned or tipped too far, or the student was out of "
+                   "frame. It is not the same as away time, which was measured. "
+                   "Nothing in this report was observed during it.", self.s["small"]),
                 _P("Assessment reflects observed head-orientation behaviour only. "
                    "No recommendation stronger than 'refer for review' is ever "
                    "produced by this system; every decision rests with a person.",
@@ -580,6 +600,41 @@ class SessionReportBuilder:
             "track eye movement independently of head position, and cannot "
             "distinguish a student consulting hidden material from one looking "
             "at nothing in particular.", self.s["body"]))
+        # Measured limits, added Oct 2026 from the first real labelled
+        # footage (8 clips, one person). Stated with their numbers,
+        # because a limitations section that only says "the system is
+        # imperfect" tells a reader nothing they can act on.
+        out.append(_P(
+            "Camera position decides how much of this is possible at all. A "
+            "student writing keeps their head down over the page, and a camera "
+            "placed above them sees mainly the top of the head. In recorded "
+            "tests the share of frames in which a face could be measured ranged "
+            "from 25% to 96% across clips of the same person at the same desk, "
+            "with the difference driven by how far forward they leaned. The "
+            "camera should sit at or below the seated face height and look "
+            "slightly upward.", self.s["body"]))
+        out.append(_P(
+            "There is a posture this system cannot measure. A head tipped far "
+            "enough down — for example toward an object held below the desk — "
+            "presents no face to the camera, so no head angle exists to be "
+            "read. In one recorded test this left a 29-second unbroken stretch, "
+            "and 94 seconds of a 133-second clip, with nothing measurable. No "
+            "choice of detection software changes this; it is a property of "
+            "where the camera is and where the face is pointing. The system now "
+            "reports such periods explicitly, as time when a seat could not be "
+            "read, rather than scoring them as ordinary quiet behaviour. Those "
+            "periods are not evidence of anything, and an unusually long one is "
+            "a reason to look at the seat, not a finding against the student.",
+            self.s["body"]))
+        out.append(_P(
+            "The thresholds behind these figures have been checked against a "
+            "small set of deliberately staged recordings of a single person, "
+            "not against a body of real exam footage. Behaviour between "
+            "students — mutual glancing and similar findings — has been tested "
+            "only with simulated data and never with real people in a room "
+            "together. Figures of that kind should be read as indicating where "
+            "to look, not as measurements of how often this system is right.",
+            self.s["body"]))
         out.append(_P(
             "Consequently no output of this system should be treated as proof of "
             "misconduct. Its purpose is to direct a human invigilator's attention "

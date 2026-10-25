@@ -43,12 +43,13 @@ second time and a log that is still being written is never served stale.
 import json
 import os
 import re
+import time
 from datetime import datetime
 
 from config import Config
 from student_pipeline import STUDENT_COLORS, MAX_STUDENTS
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2  # 2: replay timelines now carry the eye columns
 DEFAULT_HZ = 4
 _ID_RE = re.compile(r"^profile_\d{4}_\d{2}_\d{2}_\d{6}$")
 _TWALL_RE = re.compile(r'"t_wall":\s*([0-9]+(?:\.[0-9]+)?)')
@@ -103,6 +104,13 @@ def list_sessions(diag_dir):
             "duration_sec": round(last - first, 1) if first and last else None,
             "size_mb": round(st.st_size / 1e6, 1),
             "cached": os.path.exists(_cache_path(diag_dir, stem, st, DEFAULT_HZ)),
+            # Still being written: the engine is running right now. The
+            # recorder flushes continuously, so a file untouched for 20 s
+            # is finished. Without this the newest entry in the picker is
+            # usually the live session, listed as if it were a complete
+            # recording — and a replay of it ends wherever the file ends
+            # at the moment it is opened.
+            "recording": (time.time() - st.st_mtime) < 20.0,
         })
     out.sort(key=lambda s: s["id"], reverse=True)
     return out
@@ -145,7 +153,8 @@ def _build(path, stem, hz):
     step = 1.0 / hz
     r2 = lambda v: None if v is None else round(float(v), 2)
     fields = ("vis", "cal", "yaw", "z", "base", "init", "std", "prob", "verdict",
-              "slot", "cx", "pitch", "pcal", "pbase", "down")
+              "slot", "cx", "pitch", "pcal", "pbase", "down",
+              "eye", "ebase", "ecal", "easide")
     cols = {l: {k: [] for k in fields} for l in LABELS}
     times, events = [], []
     t0 = next_t = None
@@ -154,7 +163,7 @@ def _build(path, stem, hz):
     last_verdict = {}
     seen = set()
     frames = 0
-    pitch_seen = cx_seen = False
+    pitch_seen = cx_seen = eye_seen = False
     names = {}
 
     with open(path, encoding="utf-8", errors="replace") as fh:
@@ -211,6 +220,12 @@ def _build(path, stem, hz):
                     c["pcal"].append(1 if s.get("pitch_calibrated") else 0)
                     c["pbase"].append(r2(s.get("pitch_baseline")))
                     c["down"].append(1 if s.get("looking_down") else 0)
+                    if s.get("eye") is not None:
+                        eye_seen = True
+                    c["eye"].append(r2(s.get("eye")))
+                    c["ebase"].append(r2(s.get("eye_baseline")))
+                    c["ecal"].append(1 if s.get("eye_calibrated") else 0)
+                    c["easide"].append(1 if s.get("eyes_aside") else 0)
             elif line.startswith('{"type": "event"'):
                 try:
                     ev = json.loads(line)
@@ -251,6 +266,9 @@ def _build(path, stem, hz):
                 c.pop(k)
         if not cx_seen:
             c.pop("cx")
+        if not eye_seen:
+            for k in ("eye", "ebase", "ecal", "easide"):
+                c.pop(k)
         students[l] = c
 
     notes = []
@@ -260,6 +278,9 @@ def _build(path, stem, hz):
     if not cx_seen:
         notes.append("Seat positions were not recorded in this log, so desks are ordered "
                      "by seat number rather than by where students actually sat.")
+    if not eye_seen:
+        notes.append("Eye direction was not recorded in this log (it was added to the "
+                     "session log in Oct 2026), so the eyes are not shown in this replay.")
     notes.append(f"Away thresholds are rebuilt from the logged baseline and spread using "
                  f"today's setting (K_SIGMA = {Config.K_SIGMA}). Cross-student findings are "
                  f"not stored in logs, so no link beams are shown in a replay.")
@@ -277,6 +298,7 @@ def _build(path, stem, hz):
             "colors": {l: _hex(STUDENT_COLORS[i]) for i, l in enumerate(LABELS)},
             "pitch_recorded": pitch_seen,
             "positions_recorded": cx_seen,
+            "eye_recorded": eye_seen,
             "names": names,
             "verdicts": VERDICTS,
             "slot_states": SLOT_STATES,

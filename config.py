@@ -473,4 +473,221 @@ class Config:
     # enough for any exam day; an invigilator is never signed out in
     # the middle of a three-hour paper.
 
+    # ── Presence: seats the engine cannot measure ──────────────────
+    # THE GAP THIS CLOSES: a seat with no measurable face used to be
+    # completely silent — no score, no event, no word to the
+    # invigilator. Measured on the 5 Oct 2026 validation clips, the
+    # "phone in the lap" clip spent 29 seconds in one unbroken stretch
+    # with no face the engine could read, 89 seconds unmeasured in
+    # total, and still finished at verdict OK with a 3.5% peak. A
+    # student the camera cannot see scored better than one it could.
+    #
+    # presence.py now reports those spells as plain fact. It is NOT a
+    # suspicion signal and feeds nothing in the scoring pipeline: an
+    # innocent clip (posture_shift, a student leaning low over the
+    # page) has a 13-second spell of its own. The invigilator is told
+    # the seat could not be seen; the invigilator decides.
+    PRESENCE_TRACKING_ENABLED = True  # False = the old silence, exactly.
+    PRESENCE_UNMEASURED_SEC = 3.0  # A spell must last this long before
+    # it is opened, logged or counted. Ordinary writing drops the face
+    # constantly in flickers — on innocent_writing the longest single
+    # loss was 0.4s across two minutes — and reporting those would bury
+    # the real thing. Measured spell counts on the 8 clips at this
+    # value: writing 0, fidget 0, side_glance 0, long_look 0,
+    # steady 2 (10.2s), posture_shift 8 (46.0s), quick_checks 3
+    # (32.9s), phone_lap 8 (89.1s). Lowering it to 2.0s adds only
+    # short spells on clips that are already clean.
+    PRESENCE_GONE_SEC = 30.0  # Past this, a spell is called "gone"
+    # rather than "not visible". Deliberately well under
+    # IDENTITY_CONTINUITY_TIMEOUT_SEC (300s): the seat is still held
+    # for its owner, this only changes what the invigilator is told.
+    PRESENCE_MAX_SPELLS = 50  # Rolling cap per seat, same reasoning as
+    # the event log's 500: a bounded buffer cannot grow without limit
+    # over a three-hour exam.
 
+    # ── Body check (optional, off by default) ──────────────────────
+    # Tells "head down over the desk" apart from "the chair is empty",
+    # which a face model alone cannot do. Measured on the clips: body
+    # pose tracked 100% of frames, including every frame where no face
+    # was findable at all.
+    #
+    # OFF by default because it is a second model in the live loop and
+    # this project has already spent weeks investigating frame-rate
+    # complaints. When on it runs only while some seat is actually
+    # unmeasured, and at most PRESENCE_BODY_CHECK_HZ times a second —
+    # so a hall where everyone's face is visible pays nothing.
+    PRESENCE_BODY_CHECK_ENABLED = False
+    PRESENCE_BODY_CHECK_HZ = 2.0  # Upper bound on how often the body
+    # model runs. A chair does not empty in half a second.
+    PRESENCE_BODY_MODEL = "models/pose_landmarker_lite.task"
+    PRESENCE_BODY_MIN_CONF = 0.5
+
+    # ── Face rescue (optional, off by default) ─────────────────────
+    # MediaPipe's FaceMesh gives up on a low head far sooner than the
+    # face actually leaves the frame. Measured on the 5 Oct 2026 clips:
+    # FaceMesh saw 41.2% of innocent_posture_shift while YuNet found a
+    # face in 97.7%. face_rescue.py crops to YuNet's box and runs the
+    # landmark model again there.
+    #
+    # What it is measured to buy, on the whole clips:
+    #   innocent_posture_shift  41.2% -> 60.0% of frames
+    #   suspicious_phone_lap    25.1% -> 28.5%
+    # The lap posture stays unmeasurable, as expected: YuNet's box there
+    # is the crown of a head, and a crown has no face geometry.
+    #
+    # OFF by default because recovered frames go into scoring like any
+    # other frame — this CHANGES SCORES, so switching it on should be a
+    # decision with evidence behind it. Config.FACE_RESCUE_ENABLED =
+    # False reproduces the old behaviour exactly.
+    #
+    # Also measured and rejected: MediaPipe's newer Face Landmarker
+    # (Tasks API) as a replacement for FaceMesh. Worse on this footage —
+    # 32.7% against 86.4% on innocent_writing.
+    FACE_RESCUE_ENABLED = False
+    FACE_RESCUE_MODEL = "models/face_detection_yunet_2023mar.onnx"
+    FACE_RESCUE_MIN_CONF = 0.6  # YuNet score threshold.
+    FACE_RESCUE_MESH_CONF = 0.4  # Looser than the live mesh's 0.55: the
+    # crop has already been vouched for by a detector, so the second
+    # pass does not need to re-earn that confidence from scratch.
+    FACE_RESCUE_MARGIN = 0.6  # Crop padding as a fraction of the box.
+    # Too tight and the landmark model has no context; too loose and the
+    # crop is just the whole frame again.
+
+    # ── Eye tracking (optional, off by default) ────────────────────
+    # THE GAP THIS CLOSES: a student can keep their head still and move
+    # only their eyes. A head-pose engine cannot see that at all, and it
+    # is the first objection anyone raises about one.
+    #
+    # Measured on the 5 Oct 2026 clips, 5th percentile of iris offset:
+    #   innocent_steady  -0.164   suspicious_quick_checks  -0.341
+    #   innocent_writing -0.138   suspicious_side_glance   -0.414
+    #
+    # Turning this on also switches MediaPipe to refine_landmarks=True,
+    # which on this footage DETECTS THE FACE FAR MORE OFTEN — a second,
+    # unexpected benefit, larger than the YuNet rescue gives:
+    #   innocent_steady          70.8% -> 98.3% of frames
+    #   innocent_writing         69.9% -> 95.6%
+    #   suspicious_quick_checks  70.4% -> 86.4%
+    #   suspicious_side_glance   96.6% -> 100.0%
+    # Existing head angles barely move with it on: yaw differed by a
+    # median of 0.3-0.5 degrees and pitch by 0.65-0.85, against an away
+    # threshold of about 8 degrees.
+    #
+    # ON since 8 Oct 2026, with Yuvraj's approval, after the one clip
+    # that could settle it was recorded. `eyes_only` is two minutes of
+    # him sitting upright with his head deliberately still — it moved
+    # 2.0 degrees in total across the whole clip and never once crossed
+    # the away threshold — while his eyes flicked to one side.
+    #   eye tracking OFF -> OK,    peak  0.5%,  0 events, not flagged
+    #   eye tracking ON  -> ALERT, peak 53.7%, 10 events, flagged
+    # With the feature off the engine saw NOTHING: two minutes of
+    # deliberate glancing scored half a percent. The miss was total, not
+    # marginal. Across all 9 clips, switching it on takes 2 of 5 cheating
+    # clips caught to 3 of 5, with still 0 of 4 innocent clips wrongly
+    # flagged.
+    # Setting it back to False reproduces the pre-eye behaviour exactly;
+    # that was verified field-for-field on real clips before it was ever
+    # turned on, and the seeded equivalence test is unaffected either way.
+    EYE_TRACKING_ENABLED = True
+    EYE_K_SIGMA = 2.6  # Deviations beyond this many standard deviations
+    # of the student's own normal eye position count. Matches
+    # PITCH_K_SIGMA rather than yaw's 2.3: eye position is noisier.
+    EYE_MIN_OFFSET = 12.0  # Absolute floor, as a PERCENT of eye width,
+    # ON TOP of the statistical bar — the same belt-and-braces rule
+    # PITCH_MIN_DOWN_DEG applies, for the same reason: a student whose
+    # eyes barely move has a tiny std, and a z-score alone would flag
+    # ordinary reading. The innocent clips sit around 0.14 at their 5th
+    # percentile, so this is deliberately not a generous threshold and
+    # it is PROVISIONAL until a clip is recorded of eyes moving while
+    # the head stays still.
+    # Units matter here: eye_gaze.py reports the offset as a PERCENT of
+    # eye width so it shares a numeric range with the degree-based
+    # signals. CalibrationEngine floors the std it learns at MIN_STD_DEG
+    # (3.5) whatever it is fed; on a 0-1 fraction that floor makes every
+    # z-score about 0.03 and the threshold literally unreachable, which
+    # is exactly what the first build did — silently, on all 8 clips.
+    # ── Vertical eye channel (built, but OFF — see below) ─────────
+    # Measured on the real clips and NOT trustworthy enough to act on
+    # yet, which is why it has its own switch rather than riding on
+    # EYE_TRACKING_ENABLED. Frames beyond a 6-point deviation:
+    #   innocent_fidget   6.8%   suspicious_side_glance 41.0%
+    #   innocent_steady  35.3%
+    # An innocent clip sitting at 35% is not a usable separation. The
+    # likely reason is a biased sample rather than a bad idea: on
+    # innocent_steady only 411 of 3,533 frames had a readable iris at
+    # all, because he spent the clip looking down at paper with his lids
+    # covering his eyes, so the few readable frames are exactly the
+    # moments he looked up and moved — and a "resting baseline" computed
+    # from those is not his resting position.
+    # Gating to a level head helps the clip with a healthy sample
+    # (innocent_fidget falls to 1.8%) and does not rescue the starved
+    # one. So: the channel is implemented, both gates are on, the floor
+    # is conservative, and the switch stays OFF until a clip exists that
+    # actually contains a level head with the eyes dropped.
+    EYE_VERTICAL_ENABLED = False
+    EYE_REQUIRE_HEAD_LEVEL = True  # Only act while the head is NOT
+    # pitched. Same reasoning as EYE_REQUIRE_HEAD_FORWARD: a pitched
+    # head is already covered by the pitch pipeline, and it also drags
+    # the iris against the eye corners through perspective, so a reading
+    # taken then is both redundant and contaminated.
+    EYE_MIN_OFFSET_V = 15.0  # Same bar for the VERTICAL eye channel, in
+    # the same percent-of-eye-width units. Lower than the sideways one
+    # because an eye travels less far up and down before the lid gets in
+    # the way, so the same absolute floor would make the vertical
+    # channel unreachable. This closes the case neither head signal can
+    # see: a level head with the eyes dropped to something on the desk —
+    # pitch sees nothing because the head did not move, and the sideways
+    # channel sees nothing because the eyes did not go sideways.
+    # Set at the 99th percentile of the cleanest innocent sample rather
+    # than at a level that would fire often, deliberately: an unproven
+    # signal should start too quiet, not too loud.
+    EYE_MIN_OPENNESS = 0.18  # Eyelid gap over eye width. Below this the
+    # eye is blinking or squinting and the iris position means nothing.
+    EYE_MIN_WIDTH_PX = 8.0  # An eye narrower than this on screen is
+    # foreshortened past the point of a trustworthy ratio.
+    EYE_REQUIRE_HEAD_FORWARD = True  # Only act on the eye signal while
+    # the head is within its normal range. Two reasons, and both matter:
+    # a turned head is already caught by yaw, and a turned head also
+    # shifts the iris against the eye corners through plain perspective
+    # (about 0.01 of offset per degree), so a reading taken then is both
+    # redundant and contaminated. Leaving this on means the eye path
+    # fires ONLY on the case yaw genuinely cannot see.
+
+    # ── Frame faults ───────────────────────────────────────────────
+    # The main loop swallows per-frame errors so one bad frame cannot
+    # end an exam. That is right, but on 13 Oct 2026 a typo raised on
+    # EVERY frame and the run still finished, announcing 0 students and
+    # 0.0% face seen as though it had watched an empty room. See
+    # frame_faults.py. Past this fraction of failed frames a run is
+    # reported as DEGRADED in the console summary, the clip results, the
+    # batch table and the dashboard — never again as a clean empty one.
+    FRAME_FAULT_ALERT_FRAC = 0.02  # 2% of frames.
+
+    # ── Room context (optional, off by default) ────────────────────
+    # THE GAP THIS CLOSES: every student is judged only against their
+    # own baseline, so when the whole room reacts to something — the
+    # invigilator speaking, a door — four heads come up together and the
+    # engine reads four independent decisions to look away. A human
+    # invigilator would read it as one room event, and would instead
+    # notice the student who looked away while nobody else did.
+    #
+    # room_context.py damps ONE fusion term, pos_score, by how much of
+    # the rest of the room is away at that moment (leave-one-out). The
+    # event is still recorded and still counts toward frequency,
+    # away-ratio and session memory — nothing is hidden, only the
+    # instantaneous "how far is this head turned" term is discounted.
+    #
+    # OFF by default: it changes scores, same rule as
+    # EYE_TRACKING_ENABLED and FACE_RESCUE_ENABLED. False reproduces the
+    # old behaviour exactly.
+    ROOM_CONTEXT_ENABLED = False
+    ROOM_MIN_OTHERS = 2  # Fewer other students than this and the room is
+    # not a sample worth comparing against, so nothing changes. With one
+    # student in frame this feature never does anything at all.
+    ROOM_DAMP = 0.8  # How much a fully-shared moment discounts the
+    # position term. At 0.8, a glance the entire room shares contributes
+    # a fifth of what a solitary glance does. Not 1.0 on purpose: a
+    # moment everyone shares is weaker evidence, never zero evidence.
+    ROOM_SHARED_FRAC = 0.6  # At or above this fraction the moment is
+    # labelled "shared" for the dashboard. Reporting only — the damping
+    # itself is proportional and has no threshold.

@@ -91,7 +91,8 @@ def _clip_detail(batch_dir, row):
     """Per-clip extras from the clip's own results file."""
     path = os.path.join(batch_dir, os.path.splitext(row["clip"])[0] + ".json")
     extra = {"seconds_per_verdict": {}, "cross_student": [], "has_inputs": False,
-             "students": {}}
+             "students": {}, "unmeasured_sec": 0.0, "longest_unmeasured_sec": 0.0,
+             "footage_sec": 0.0}
     if not os.path.exists(path):
         return extra
     try:
@@ -106,6 +107,16 @@ def _clip_detail(batch_dir, row):
         extra["students"][label] = {k: s.get(k) for k in (
             "highest_verdict", "peak_score", "events", "longest_event_sec", "total_away_sec",
             "events_by_direction")}
+        # How much of this clip the engine could not read at all. Shown
+        # beside the verdict so a clip that was mostly unmeasurable is
+        # never mistaken for one that was checked and cleared.
+        pres = s.get("presence") or {}
+        extra["students"][label]["presence"] = pres or None
+        extra["unmeasured_sec"] = max(extra["unmeasured_sec"],
+                                      pres.get("total_unmeasured_sec") or 0.0)
+        extra["longest_unmeasured_sec"] = max(extra["longest_unmeasured_sec"],
+                                              pres.get("longest_unmeasured_sec") or 0.0)
+    extra["footage_sec"] = (res.get("video") or {}).get("footage_sec") or 0.0
     extra["seconds_per_verdict"] = spv
     extra["cross_student"] = res.get("cross_student") or []
     extra["has_inputs"] = os.path.exists(os.path.join(

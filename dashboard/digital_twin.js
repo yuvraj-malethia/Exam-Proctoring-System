@@ -129,6 +129,7 @@
       paper:    cssVar("--room-paper", "#e9e3d5"),
       forward:  cssVar("--room-forward", "#93a6ff"),
       away:     cssVar("--room-away", "#ff7a5e"),
+      eye:      cssVar("--room-eye", "#4fd6c7"),
       fan:      cssVar("--room-fan", "#93a6ff"),
       link:     cssVar("--room-link", "#93a6ff"),
       accent:   cssVar("--blue", "#93a6ff"),
@@ -220,7 +221,23 @@
       away: hp.state === "AWAY" || !!(p.pitch && p.pitch.looking_down),
       down: !!(p.pitch && p.pitch.looking_down),
       fan: null,
+      // Where the EYES point, as a fraction of eye width either side of
+      // this student's own calibrated centre (eye_gaze.py). Null when
+      // eye tracking is off, so a dial can tell that from "centred".
+      eye: null,
+      eyeAside: !!(p.eye && p.eye.aside),
     };
+    if (p.eye && num(p.eye.offset)) {
+      const base = num(p.eye.baseline) ? p.eye.baseline : 0;
+      // Percent of eye width (eye_gaze.py). Clamped to the physical
+      // limit of an eye in its socket: half an eye width either way is
+      // the iris hard against the corner.
+      out.eye = Math.max(-50, Math.min(50, p.eye.offset - base));
+    }
+    if (p.eye && num(p.eye.down_offset)) {
+      const vbase = num(p.eye.down_baseline) ? p.eye.down_baseline : 0;
+      out.eyeDown = Math.max(-50, Math.min(50, p.eye.down_offset - vbase));
+    }
     if (num(cal.threshold) && num(cal.baseline)) {
       const yb = cal.baseline - centre;
       out.fan = [drawDeg(yb - cal.threshold, YAW_CLAMP_DEG), drawDeg(yb + cal.threshold, YAW_CLAMP_DEG)];
@@ -271,6 +288,14 @@
           '<div class="twin-labels" data-role="labels"></div>' +
           '<div class="twin-message" data-role="message">Loading the 3D room…</div>' +
           '<div class="twin-tag" data-role="tag"></div>' +
+          // Two lines leave a head, and a viewer has no way to know
+          // which is which without being told. Hidden until an eye
+          // reading actually exists, so a head-only session is not
+          // offered a key to something it never draws.
+          '<div class="twin-key" data-role="key" hidden>' +
+            '<span class="twin-key-item"><i class="k-head"></i>head</span>' +
+            '<span class="twin-key-item"><i class="k-eye"></i>eyes</span>' +
+          '</div>' +
         '</div>' +
         '<div class="twin-readout">' +
           '<div class="twin-who"><span class="status-dot status-dot--off" data-role="dot"></span>' +
@@ -420,6 +445,34 @@
     tip.position.z = BEAM_LEN;
     [cone, line, tip].forEach(function (m) { m.renderOrder = 10; beam.add(m); });
 
+    // A second, finer beam for where the EYES point, hinged inside the
+    // head so it swings relative to it. When the eyes go aside while the
+    // head stays forward, the two beams visibly part — which is the one
+    // thing a head-only room could never show. Hidden unless the payload
+    // actually carries an eye reading (eye_gaze.py).
+    // Three things separate it from the head beam, on purpose, because
+    // one alone is not enough: it is DASHED where the head beam is
+    // solid, it is a different hue (--room-eye), and it starts higher
+    // up, at the brow, so the two stay distinguishable even when the
+    // eyes and the head point the same way and the lines are parallel.
+    const eyeBeam = new THREE.Group();
+    eyeBeam.position.set(beam.position.x, beam.position.y + 0.05, beam.position.z);
+    eyeBeam.visible = false;
+    head.add(eyeBeam);
+    const eyeMat = new THREE.LineDashedMaterial({ color: pal.eye, transparent: true,
+      opacity: 0.95, depthTest: false, dashSize: 0.055, gapSize: 0.04 });
+    const eyeLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(
+      [new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, BEAM_LEN * 0.72)]), eyeMat);
+    // Required by LineDashedMaterial: without it the dashes never
+    // appear and the line renders solid, which would defeat the point.
+    eyeLine.computeLineDistances();
+    const eyeTipMat = new THREE.MeshBasicMaterial({ color: pal.eye, depthTest: false });
+    // A small ring rather than a sphere, so the eye tip and the head
+    // tip do not read as the same marker at a glance.
+    const eyeTip = new THREE.Mesh(new THREE.TorusGeometry(0.016, 0.005, 8, 18), eyeTipMat);
+    eyeTip.position.z = BEAM_LEN * 0.72;
+    [eyeLine, eyeTip].forEach(function (m) { m.renderOrder = 11; eyeBeam.add(m); });
+
     // Floor ring in the student's current risk-level colour.
     const haloMat = new THREE.MeshBasicMaterial({ color: pal.off, transparent: true, opacity: 0.6, depthWrite: false });
     const haloFillMat = new THREE.MeshBasicMaterial({ color: pal.off, transparent: true, opacity: 0.07, depthWrite: false });
@@ -432,6 +485,8 @@
 
     return {
       root: root, head: head, beam: beam, pickables: pickables,
+      eyeBeam: eyeBeam, eyeMat: eyeMat, eyeTipMat: eyeTipMat,
+      eyeYaw: 0, targetEyeYaw: 0, eyePitch: 0, targetEyePitch: 0,
       beamMat: beamMat, lineMat: lineMat, tipMat: tipMat,
       haloMat: haloMat, haloFillMat: haloFillMat, collarMat: collar,
       ghostMats: [skin, cloth, visor, collar],
@@ -825,12 +880,19 @@
         // negative rotation about Y. Nodding down is positive about X.
         s.head.rotation.y = -s.yaw;
         s.head.rotation.x = s.pitch;
+        // Eyes swing inside the head, so this rotation is relative.
+        s.eyeYaw += (s.targetEyeYaw - s.eyeYaw) * k;
+        s.eyePitch += (s.targetEyePitch - s.eyePitch) * k;
+        s.eyeBeam.rotation.y = -s.eyeYaw;
+        s.eyeBeam.rotation.x = s.eyePitch;
         const see = s.ghost < 0.99;
         s.ghostMats.forEach(function (m) {
           m.opacity = s.ghost;
           if (m.transparent !== see) { m.transparent = see; m.needsUpdate = true; }
         });
-        busy = busy || Math.abs(s.targetYaw - s.yaw) > 1e-4 || Math.abs(s.targetPitch - s.pitch) > 1e-4 ||
+        busy = busy || Math.abs(s.targetEyeYaw - s.eyeYaw) > 1e-4 ||
+          Math.abs(s.targetEyePitch - s.eyePitch) > 1e-4 ||
+          Math.abs(s.targetYaw - s.yaw) > 1e-4 || Math.abs(s.targetPitch - s.pitch) > 1e-4 ||
           Math.abs(s.targetGhost - s.ghost) > 1e-3 || Math.abs(s.targetX - s.x) > 1e-3;
       });
       return busy;
@@ -1024,6 +1086,35 @@
       s.targetPitch = present ? deg(drawDeg(relDown(p), PITCH_CLAMP_DEG)) : 0;
       s.targetGhost = present ? 1 : 0.22;
       s.beam.visible = present;
+      // Eye beam. The offset is a percent of eye width and is drawn one
+      // degree per percent, the same scale the flat seat dials use, so
+      // the room and the dials agree. Red pen only when the eyes are aside while the
+      // head is forward — the case the head alone cannot report.
+      const eyeView = (p && p.eye && num(p.eye.offset)) ? p.eye : null;
+      if (eyeView) {
+        T.sawEye = true;
+        // Show the head/eyes key as soon as there is an eye reading, not
+        // only once a seat has been selected: a replay opens with nothing
+        // selected and would otherwise draw two lines with no key.
+        if (refs.key && refs.key.hidden) refs.key.hidden = false;
+      }
+      s.eyeBeam.visible = present && !!eyeView;
+      if (present && eyeView) {
+        const base = num(eyeView.baseline) ? eyeView.baseline : 0;
+        const off = Math.max(-50, Math.min(50, eyeView.offset - base));
+        s.targetEyeYaw = deg(Math.max(-45, Math.min(45, off)));
+        // Eyes dropping toward the desk with a level head — the posture
+        // neither head signal can see. One degree per percent again.
+        const vbase = num(eyeView.down_baseline) ? eyeView.down_baseline : 0;
+        const voff = num(eyeView.down_offset) ? eyeView.down_offset - vbase : 0;
+        s.targetEyePitch = deg(Math.max(-35, Math.min(35, voff)));
+        const ec = eyeView.aside ? pal.away : pal.eye;
+        s.eyeMat.color.set(ec);
+        s.eyeTipMat.color.set(ec);
+      } else {
+        s.targetEyeYaw = 0;
+        s.targetEyePitch = 0;
+      }
       const beamCol = g.key === "away" ? pal.away : g.key === "calib" ? pal.calib : pal.forward;
       s.beamMat.color.set(beamCol);
       s.lineMat.color.set(beamCol);
@@ -1220,6 +1311,7 @@
       setCls(refs.dot, "status-dot status-dot--" + lk);
       setCls(refs.level, "badge lvl-" + lk);
       setText(refs.level, levelText(p));
+      if (refs.key) refs.key.hidden = !T.sawEye;
       setText(refs.tag, p.label + " · " + g.text);
       refs.tag.classList.toggle("is-away", g.key === "away");
 
@@ -1365,6 +1457,10 @@
             yawRightDeg: +(s.yaw * 180 / Math.PI).toFixed(2), pitchDownDeg: +(s.pitch * 180 / Math.PI).toFixed(2),
             targetYawRightDeg: +(s.targetYaw * 180 / Math.PI).toFixed(2),
             targetPitchDownDeg: +(s.targetPitch * 180 / Math.PI).toFixed(2), ghost: +s.ghost.toFixed(2),
+            eyeShown: !!s.eyeBeam.visible,
+            eyeYawRightDeg: +(s.eyeYaw * 180 / Math.PI).toFixed(2),
+            targetEyeYawRightDeg: +(s.targetEyeYaw * 180 / Math.PI).toFixed(2),
+            targetEyePitchDownDeg: +(s.targetEyePitch * 180 / Math.PI).toFixed(2),
           };
         });
         return {

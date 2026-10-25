@@ -143,6 +143,13 @@ def serialize_config() -> dict:
             "halflife_sec": Config.SESSION_MEMORY_HALFLIFE_SEC,
             "divisor": Config.SESSION_MEMORY_DIVISOR,
         },
+        # Eye tracking thresholds, so the eye graph can draw the same
+        # floor the engine applies instead of a hardcoded copy of it.
+        "eye": {
+            "enabled": Config.EYE_TRACKING_ENABLED,
+            "k_sigma": Config.EYE_K_SIGMA,
+            "min_offset": Config.EYE_MIN_OFFSET,
+        },
         "identity": {
             "match_radius_frac": Config.IDENTITY_MATCH_RADIUS_FRAC,
             "grace_period_sec": Config.IDENTITY_GRACE_PERIOD_SEC,
@@ -254,7 +261,32 @@ def serialize_temporal(temporal: TemporalPatternEngine, t: float) -> dict:
         "last_event": last_event,
         "longest_event": longest_event,
         "recent_events": events_payload,
+        # WHERE THE DEVIATIONS CAME FROM (Oct 2026). Every away event
+        # carries a direction, and the three signals that can raise one
+        # are distinguishable by it: a yaw turn ("Left"/"Right"), a pitch
+        # drop ("Down") and an eye glance ("Eyes Left"/"Eyes Right").
+        # Counting them apart is the only way to answer "how much of
+        # this score came from the eyes?" — the score itself mixes them,
+        # by design, because an eye glance is routed through the same
+        # five fusion signals a head turn is. Read-only; nothing here is
+        # fed back into scoring.
+        "event_sources": _event_sources(temporal),
     }
+
+
+def _event_sources(temporal) -> dict:
+    """Away events split by what raised them. See the note above."""
+    head = down = eyes = 0
+    for e in temporal.events:
+        d = str(getattr(e, "direction", "") or "")
+        if d.startswith("Eyes"):
+            eyes += 1
+        elif d == "Down":
+            down += 1
+        else:
+            head += 1
+    return {"head": head, "down": down, "eyes": eyes,
+            "total": head + down + eyes}
 
 
 def serialize_suspicion(fs: SuspicionState) -> dict:
@@ -289,7 +321,7 @@ def serialize_events(event_logger, n: int = 20) -> list:
 
 
 def serialize_student(student: "StudentPipeline", visible: bool, t: float,
-                       yaw_log, score_log=None) -> dict:
+                       yaw_log, score_log=None, presence=None) -> dict:
     """
     Combines the read-only serializers above into one student record.
     yaw_log is a small (timestamp, yaw) rolling buffer maintained ONLY for
@@ -350,6 +382,33 @@ def serialize_student(student: "StudentPipeline", visible: bool, t: float,
         "suspicion": serialize_suspicion(student.fs) if calib.is_calibrated else None,
         "graph": graph,
         "score_history": score_history,
+        # Visibility, not suspicion. None when presence tracking is off,
+        # so the browser can tell "switched off" from "all fine".
+        "presence": presence.payload(student.sid, t) if presence is not None else None,
+        # Where the EYES point, separately from where the head points
+        # (eye_gaze.py). None when eye tracking is off or the iris
+        # landmarks were not usable on this frame, so the browser can
+        # tell "switched off" from "centred".
+        "eye": ({
+            "offset": round(student.eye, 4),
+            "raw": round(student.raw_eye, 4),
+            "z": round(student.eye_z, 2) if student.eye_calib.is_calibrated else None,
+            "baseline": (round(student.eye_calib.baseline, 4)
+                         if student.eye_calib.is_calibrated else None),
+            "calibrated": student.eye_calib.is_calibrated,
+            # Vertical channel, reported alongside rather than folded in:
+            # "eyes down with a level head" and "eyes to the side" are
+            # different behaviours and a reader should see which it was.
+            "down_offset": round(student.eye_v, 4),
+            "down_z": (round(student.eye_v_z, 2)
+                       if student.eye_v_calib.is_calibrated else None),
+            "down_baseline": (round(student.eye_v_calib.baseline, 4)
+                              if student.eye_v_calib.is_calibrated else None),
+            "down_calibrated": student.eye_v_calib.is_calibrated,
+            "openness": round(student.eye_openness, 3),
+            "aside": student.eyes_aside,
+            "direction": student.eye_direction,
+        } if (Config.EYE_TRACKING_ENABLED and getattr(student, "eye_seen", False)) else None),
     }
 
 
@@ -358,7 +417,8 @@ def serialize_full_state(students: dict, active_ids: list, t: float,
                           event_logger=None, evidence=None,
                           identity=None, archive=None, gallery=None,
                           reviews=None, patterns=None, correlations=None,
-                          roster=None, score_logs=None, replay=None) -> dict:
+                          roster=None, score_logs=None, replay=None,
+                          presence=None, faults=None, room=None) -> dict:
     """
     Top-level snapshot sent to the browser. Builds the per-student records
     above, then adds a small Overview-page aggregation (counts + who has
@@ -383,7 +443,8 @@ def serialize_full_state(students: dict, active_ids: list, t: float,
     for sid, student in students.items():
         visible = sid in active_set
         payload = serialize_student(student, visible, t, yaw_logs[sid],
-                                     score_log=(score_logs or {}).get(sid))
+                                     score_log=(score_logs or {}).get(sid),
+                                     presence=presence)
         payload["latest_evidence"] = evidence_latest.get(student.label)
         # The verdict (OK / WATCH / ALERT / FLAG) and the four checks
         # behind it — the SAME verdict that triggers evidence capture and
@@ -392,6 +453,11 @@ def serialize_full_state(students: dict, active_ids: list, t: float,
         # see the verdict that actually decides when evidence is saved,
         # nor which checks a student had tripped. Read-only.
         payload["verdict"] = verdict_payload(student, t)
+        # How much of the rest of the room was away at the same moment,
+        # and therefore how much this student's position term was
+        # discounted (room_context.py). None when the feature is off or
+        # there was no room to compare against.
+        payload["room"] = room.payload(sid) if room is not None else None
         # Named behavioural patterns for this student (see
         # behavior_patterns.py). Explains WHY the score is what it is,
         # in language a teacher can act on — and can exonerate as well
@@ -453,6 +519,26 @@ def serialize_full_state(students: dict, active_ids: list, t: float,
             "engine_connected": True,
             "fps": round(fps, 1),
             "visible_students": len(active_ids),
+            # The room as a whole: how many students are away right now.
+            # This is the second line on the risk chart — the thing an
+            # individual score has to be read against.
+            "room": (room.room_payload() if room is not None else None),
+            # Errors the per-frame except swallowed (frame_faults.py).
+            # None when not tracked. A run where frames are failing must
+            # be visible as that, not as a quiet empty room.
+            "faults": (faults.payload() if faults is not None else None),
+            # Seats occupied but not measurable right now, longest
+            # first. Empty list = everybody's face can be read; None =
+            # presence tracking is switched off (see presence.py).
+            "unmeasured": ([
+                {"label": students[sid].label,
+                 "sid": sid,
+                 "sec": presence.payload(sid, t)["current_sec"],
+                 "body_seen": presence.payload(sid, t)["body_seen"]}
+                for sid in sorted(presence.unmeasured_ids(),
+                                  key=lambda i: -presence.unmeasured_for(i, t))
+                if sid in students
+            ] if presence is not None else None),
             "calibrated_students": calibrated_count,
             "attention_students": attention_count,
             "highest_risk": (

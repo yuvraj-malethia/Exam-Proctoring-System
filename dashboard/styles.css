@@ -87,6 +87,10 @@
   --room-paper:   #ffffff;
   --room-forward: #2a48c9;
   --room-away:    #c7361f;
+  /* The eye line. Deliberately a different hue from the head line, and
+     cooler, so the two are told apart by colour as well as by the dash
+     pattern and the height they start from. */
+  --room-eye:     #0e8f87;
   --room-fan:     #2a48c9;
   --room-link:    #2a48c9;
 
@@ -152,6 +156,7 @@
   --room-paper:   #e9e3d5;
   --room-forward: #93a6ff;
   --room-away:    #ff7a5e;
+  --room-eye:     #4fd6c7;
   --room-fan:     #93a6ff;
   --room-link:    #93a6ff;
 }
@@ -566,6 +571,10 @@ main { padding: 26px var(--page-pad) 80px; max-width: 1680px; margin: 0 auto; }
   color: var(--blue); background: var(--blue-soft);
 }
 .callout-link .callout-mark { color: var(--pen); background: var(--pen-soft); }
+/* "Cannot be seen" is the system describing its own limit, not an
+   accusation, so it stays blue ink by rule 2 — never the red pen. */
+.callout-blind::before { background: var(--blue); }
+.callout-blind .callout-mark { color: var(--blue); background: var(--blue-soft); }
 .callout-body { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .question { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--rule); }
 .question:first-child { border-top: 0; padding-top: 0; }
@@ -682,6 +691,17 @@ main { padding: 26px var(--page-pad) 80px; max-width: 1680px; margin: 0 auto; }
 .seat[data-tier="watch"] .gaze.is-away .gaze-needle { background: var(--c-mild); }
 .seat[data-tier="look"] .gaze.is-away .gaze-needle { background: var(--pen); }
 .gaze.is-down .gaze-needle { height: 20%; }
+/* The eye needle: shorter and finer than the head needle, because it
+   answers a smaller question. Dashed, so the two are never confused at a
+   glance. Red pen only when the eyes are aside while the head is not —
+   the one case the head alone cannot report. */
+.gaze-eye {
+  position: absolute; left: 50%; bottom: 50%; width: 0; height: 30%; margin-left: 0;
+  border-left: 1.5px dashed var(--ink-3); transform-origin: 50% 100%;
+  transition: transform 0.2s var(--ease), border-color 0.2s;
+}
+.gaze-eye.is-aside { border-left-color: var(--pen); border-left-style: solid; width: 0; }
+.gaze.is-idle .gaze-eye { opacity: 0; }
 .gaze.is-idle .gaze-needle { opacity: 0; }
 .gaze.is-idle .gaze-head { background: var(--ink-4); }
 .gaze-down { position: absolute; right: -2px; bottom: -2px; padding: 1px 4px; border-radius: 4px; font: 600 8.5px/1.3 var(--font-mono); letter-spacing: 0.08em; background: var(--pen); color: var(--sheet); display: none; }
@@ -694,6 +714,16 @@ main { padding: 26px var(--page-pad) 80px; max-width: 1680px; margin: 0 auto; }
 .seat-now.is-away { color: var(--ink); font-weight: 500; }
 .seat[data-tier="watch"] .seat-now.is-away { color: var(--c-mild); }
 .seat[data-tier="look"] .seat-now.is-away { color: var(--pen); }
+
+/* A seat with no readable face. Blue, not red: the engine is saying it
+   has nothing to measure, which is a fact about the camera, not about
+   the student. The dashed rule marks the card's numbers as stale. */
+.seat-blind {
+  margin-top: 6px; padding: 5px 8px; border-radius: 7px;
+  border: 1px dashed var(--blue); background: var(--blue-soft);
+  font: 500 12px/1.35 var(--font-mono); color: var(--blue);
+}
+.seat.is-blind .seat-scoreline, .seat.is-blind .gaze, .seat.is-blind .spark { opacity: 0.4; }
 
 .spark { display: block; width: 100%; height: 34px; overflow: visible; }
 .spark-line { fill: none; stroke: var(--ink-3); stroke-width: 1.4; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
@@ -1125,6 +1155,13 @@ main { padding: 26px var(--page-pad) 80px; max-width: 1680px; margin: 0 auto; }
 .vbar { display: flex; height: 12px; border-radius: 4px; overflow: hidden; background: var(--paper-deep); }
 .vseg { height: 100%; }
 .vfacts { font: 400 11.5px/1.45 var(--font-mono); color: var(--ink-3); }
+/* A clip the engine mostly could not read. Blue, by rule 2: this is
+   the system reporting its own blind spot, not marking the student. */
+.vblind {
+  display: inline-block; margin-top: 4px; padding: 2px 7px; border-radius: 6px;
+  border: 1px dashed var(--blue); color: var(--blue);
+  font: 500 11.5px/1.4 var(--font-mono);
+}
 .vout { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .stamp[data-v="MATCH"] { color: var(--sage); }
 .stamp[data-v="DIFFERS"] { color: var(--pen); transform: rotate(-2deg); }
@@ -1424,3 +1461,129 @@ body[data-stale] .page[data-page="live"] .lower {
   .hero-facts { grid-template-columns: auto auto; }
   .twin-axes { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Inspector: the seat cannot be read right now, so the numbers above
+   are from the last moment it could. Blue by rule 2 — the system
+   describing its own limit. */
+.insp-blind {
+  margin: 10px 0 0; padding: 8px 10px; border-radius: 8px;
+  border: 1px dashed var(--blue); background: var(--blue-soft);
+  font: 400 12.5px/1.5 var(--font-sans); color: var(--blue);
+}
+
+/* Inspector: the eye reading, stated apart from the head reading. Ink
+   while it only describes; red pen when the eyes are aside and the head
+   is not, which is the case nothing else on this page can report. */
+.insp-eye {
+  margin: 8px 0 0; padding: 8px 10px; border-radius: 8px;
+  background: var(--paper-deep);
+  font: 400 12.5px/1.5 var(--font-sans); color: var(--ink-2);
+}
+.insp-eye.is-aside { color: var(--pen); background: var(--pen-soft); font-weight: 500; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   DEVELOPER — the engineering view of the five fusion signals
+   The Students page says what each signal means in words. This is the
+   page where someone asks how the number is actually computed, so it
+   names the variable, the Config constant and the weight, and shows
+   what each one puts into the final score.
+   ═══════════════════════════════════════════════════════════════════ */
+.bar-row.is-tech .bar-top > span:first-child { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
+.sig-var { font: 600 12.5px/1.3 var(--font-mono); color: var(--ink); }
+.sig-note { font: 400 11.5px/1.4 var(--font-sans); color: var(--ink-3); }
+.bar-row.is-tech .w { font: 500 11.5px/1 var(--font-mono); color: var(--blue); }
+.sig-foot { display: flex; justify-content: space-between; gap: 10px; margin-top: 4px; }
+.sig-const { font: 500 11px/1.3 var(--font-mono); color: var(--ink-3); letter-spacing: 0.02em; }
+.sig-contrib { font: 400 11px/1.3 var(--font-mono); color: var(--ink-3); }
+.formula {
+  margin: 14px 0 0; padding: 9px 11px; border-radius: 8px;
+  background: var(--paper-deep); border-left: 2px solid var(--blue);
+  font: 400 11.5px/1.6 var(--font-mono); color: var(--ink-2);
+}
+
+/* Where the away events came from. Ink, not colour: this is a factual
+   split of events that have already been counted, not a new alarm. */
+.srcs { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--rule); }
+.src-row {
+  display: grid; grid-template-columns: minmax(96px, auto) 2.5em minmax(60px, 1fr);
+  align-items: center; gap: 4px 10px; margin-top: 9px;
+}
+.src-k { font: 500 12.5px/1.3 var(--font-sans); color: var(--ink); }
+.src-n { font: 600 13px/1 var(--font-mono); color: var(--ink); text-align: right; }
+.src-bar { height: 5px; border-radius: 3px; background: var(--rule); overflow: hidden; }
+.src-bar i { display: block; height: 100%; background: var(--ink-2); }
+.src-why { grid-column: 1 / -1; font: 400 10.5px/1.45 var(--font-mono); color: var(--ink-4); }
+.src-row.is-zero .src-k, .src-row.is-zero .src-n { color: var(--ink-4); }
+
+/* 3D room key. Two lines leave each head — this says which is which.
+   Sits inside the viewport, bottom-left, out of the way of the labels. */
+.twin-key {
+  position: absolute; left: 10px; bottom: 10px; z-index: 2;
+  display: flex; gap: 12px; padding: 5px 9px; border-radius: 7px;
+  background: color-mix(in srgb, var(--sheet) 82%, transparent);
+  border: 1px solid var(--rule);
+  font: 500 10.5px/1 var(--font-mono); color: var(--ink-2);
+  letter-spacing: 0.04em; text-transform: uppercase;
+  pointer-events: none;
+}
+.twin-key-item { display: inline-flex; align-items: center; gap: 6px; }
+.twin-key i { display: block; width: 18px; height: 0; }
+.twin-key .k-head { border-top: 2.5px solid var(--room-forward); }
+.twin-key .k-eye { border-top: 2px dashed var(--room-eye); }
+
+/* Developer — errors the per-frame except swallowed. Red pen only when
+   the run is degraded: a handful of skipped frames is a fact, a run that
+   lost most of its frames is something you must not read past. */
+.fault-head { margin: 0 0 8px; font: 500 13px/1.4 var(--font-sans); color: var(--ink); }
+.fault-head.is-bad { color: var(--pen); font-weight: 600; }
+.ok-note { color: var(--ink-3); }
+.fault-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.fault-list li { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; padding-top: 8px; border-top: 1px solid var(--rule); }
+.fault-list li:first-child { border-top: 0; padding-top: 0; }
+.fault-n { font: 600 12px/1.4 var(--font-mono); color: var(--pen); }
+.fault-list code { font: 400 11.5px/1.45 var(--font-mono); color: var(--ink-2); word-break: break-word; }
+.fault-list .fine { grid-column: 2; }
+
+/* The risk chart's second line: how much of the room was away at each
+   moment. Ink, dashed, thin — it is the thing a student's own line has
+   to be read against, never an alarm of its own (room_context.py). */
+.chart-room {
+  fill: none; stroke: var(--ink-3); stroke-width: 1.4;
+  stroke-dasharray: 5 4; opacity: 0.75; vector-effect: non-scaling-stroke;
+}
+.chart-room-label { font: 500 10.5px/1 var(--font-mono); fill: var(--ink-3); }
+
+/* Evidence shown live. The red-pen rail: unlike the other callouts this
+   one only ever appears because a student was already flagged, so the
+   colour is carrying real meaning rather than decorating. */
+.callout-shot::before { background: var(--pen); }
+.callout-shot .callout-mark { color: var(--pen); background: var(--pen-soft); }
+.shot { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; margin: 0 0 10px; align-items: start; }
+.shot img {
+  width: 96px; height: 72px; object-fit: cover; border-radius: 6px;
+  border: 1px solid var(--rule-strong); background: var(--paper-deep); display: block;
+}
+.shot a:focus-visible img { outline: 2px solid var(--blue); outline-offset: 2px; }
+.shot figcaption { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; }
+.shot figcaption b { font: 500 14px/1.3 var(--font-display); }
+.shot figcaption .when { font: 400 11px/1.3 var(--font-mono); color: var(--ink-3); }
+.shot figcaption .num { font: 600 12px/1.3 var(--font-mono); color: var(--pen); }
+.shot figcaption .why { flex-basis: 100%; font-size: 12px; color: var(--ink-2); line-height: 1.45; }
+
+/* Inspector: what the rest of the room was doing at the same moment.
+   Sage when the moment was shared — this is the one colour reserved for
+   clearing someone, and a shared moment is exactly that. */
+.insp-room {
+  margin: 8px 0 0; padding: 8px 10px; border-radius: 8px;
+  background: var(--paper-deep);
+  font: 400 12.5px/1.5 var(--font-sans); color: var(--ink-2);
+}
+.insp-room.is-shared { color: var(--c-normal); background: var(--sage-soft, var(--paper-deep)); font-weight: 500; }
+
+/* The eye strip under the head graph. Shorter than the head graph on
+   purpose: it answers a smaller question, and it is a different unit
+   (percent of eye width, not degrees), so it has its own axis. */
+.graph-eye { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--rule); }
+.graph-eye-title { margin: 0 0 6px; }
+.graph-wrap--eye { height: 96px; }
+.graph-eye .fine { margin-top: 8px; }

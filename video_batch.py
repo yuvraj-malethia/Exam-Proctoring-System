@@ -81,6 +81,12 @@ def summarise(clip, result, label_info):
     if result is None:
         row.update(outcome="ENGINE ERROR")
         return row
+    # A clip whose frames were failing is not a clip that was checked.
+    # Saying "matches label" about it would be the same silent-empty-
+    # result failure frame_faults.py exists to stop.
+    _f = (result.get("video") or {}).get("faults") or {}
+    if _f.get("degraded"):
+        row["degraded"] = True
     students = result.get("students", {})
     verdicts = [s["highest_verdict"] for s in students.values()]
     directions = {}
@@ -91,7 +97,11 @@ def summarise(clip, result, label_info):
         for p in s.get("patterns", []):
             patterns[p["label"]] = max(patterns.get(p["label"], 0.0), p["best_confidence"])
     flagged = bool(result.get("flagged_for_review"))
-    if label == "innocent":
+    _deg = ((result.get("video") or {}).get("faults") or {}).get("degraded")
+    if _deg:
+        # Not "matches" and not "differs" — this clip was not checked.
+        outcome = "DEGRADED - frames failed"
+    elif label == "innocent":
         outcome = "matches label" if not flagged else "DIFFERS FROM LABEL"
     elif label == "suspicious":
         outcome = "matches label" if flagged else "DIFFERS FROM LABEL"
@@ -106,8 +116,16 @@ def summarise(clip, result, label_info):
         patterns=[k for k, _ in sorted(patterns.items(), key=lambda kv: -kv[1])],
         students_seen=len(students),
         face_seen_pct=result["video"]["face_seen_pct"],
+        faults=(result["video"].get("faults") or None),
         footage_sec=result["video"]["footage_sec"],
         outcome=outcome,
+        # How long the engine could not read a face at all. A clip that
+        # was mostly unmeasurable has not been "checked and cleared" —
+        # it has barely been checked. See presence.py.
+        unmeasured_sec=round(max((( s.get("presence") or {}).get("total_unmeasured_sec") or 0.0)
+                                 for s in students.values()), 1) if students else 0.0,
+        longest_unmeasured_sec=round(max((( s.get("presence") or {}).get("longest_unmeasured_sec") or 0.0)
+                                         for s in students.values()), 1) if students else 0.0,
     )
     return row
 
@@ -170,15 +188,21 @@ def table(rows):
 def markdown(rows, changes, settings, folder):
     md = [f"# Clip replay batch — {datetime.now():%Y-%m-%d %H:%M}", "",
           f"Clips folder: `{folder}`", "",
-          "| Clip | Label | Flagged for review | Highest verdict | Peak score | Events | Directions | Patterns | Outcome |",
-          "|---|---|---|---|---|---|---|---|---|"]
+          "| Clip | Label | Flagged for review | Highest verdict | Peak score | Events | Not measurable | Directions | Patterns | Outcome |",
+          "|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         if "flagged" not in r:
-            md.append(f"| {r['clip']} | {r['label'] or '-'} | - | - | - | - | - | - | {r['outcome']} |")
+            md.append(f"| {r['clip']} | {r['label'] or '-'} | - | - | - | - | - | - | - | {r['outcome']} |")
             continue
         dirs = ", ".join(f"{k} {v}" for k, v in r["directions"].items()) or "-"
+        # "Not measurable" is shown next to the verdict on purpose: a
+        # clip the engine mostly could not read must not be mistaken for
+        # a clip it read and cleared.
+        unm = (f"{r.get('unmeasured_sec', 0.0):.0f}s (longest "
+               f"{r.get('longest_unmeasured_sec', 0.0):.0f}s)"
+               if r.get("unmeasured_sec") else "-")
         md.append(f"| {r['clip']} | {r['label'] or '-'} | {'yes' if r['flagged'] else 'no'} | "
-                  f"{r['highest_verdict']} | {r['peak_score']:.1f}% | {r['events']} | {dirs} | "
+                  f"{r['highest_verdict']} | {r['peak_score']:.1f}% | {r['events']} | {unm} | {dirs} | "
                   f"{', '.join(r['patterns']) or '-'} | {r['outcome']} |")
     md += ["", "## Changes since previous batch", ""] + [f"- {c}" for c in changes]
     md += ["", "## Settings used", "", "```", json.dumps(settings, indent=2), "```", "",
